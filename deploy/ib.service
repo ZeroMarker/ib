@@ -9,10 +9,10 @@ User=ubuntu
 Group=ubuntu
 WorkingDirectory=/home/ubuntu/ib
 EnvironmentFile=/etc/ib/ib.env
-Environment=SERVER_ADDR=127.0.0.1:8080
+Environment=SERVER_ADDR=127.0.0.1:8081
 Environment=RUST_BACKTRACE=1
 Environment=LD_LIBRARY_PATH=/home/ubuntu/instantclient/instantclient_23_26
-ExecStart=/home/ubuntu/ib/target/release/ib serve 127.0.0.1:8080
+ExecStart=/home/ubuntu/ib/target/release/ib serve 127.0.0.1:8081
 Restart=on-failure
 RestartSec=5
 UMask=027

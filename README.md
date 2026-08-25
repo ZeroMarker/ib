@@ -89,7 +89,7 @@ ib cash list U1234567
 启动 HTTP API：
 
 ```bash
-export SERVER_ADDR=127.0.0.1:8080
+export SERVER_ADDR=127.0.0.1:8081
 ib serve
 ```
 
@@ -109,7 +109,7 @@ Resend 接入完成后通过 `RESEND_API_KEY` 配置密钥；当前版本不会�
 
 ## Caddy 部署
 
-`deploy/Caddyfile` 将 `https://20070809.xyz/public/ibkr/` 反向代理到本机的 `127.0.0.1:8080`，并移除外部路径前缀。启动服务后将该配置加入 Caddy：
+`deploy/Caddyfile` 将 `https://20070809.xyz/public/ibkr/` 反向代理到本机的 `127.0.0.1:8081`，并移除外部路径前缀。启动服务后将该配置加入 Caddy：
 
 ```bash
 caddy validate --config deploy/Caddyfile
@@ -118,7 +118,7 @@ caddy reload --config deploy/Caddyfile
 
 ## systemd 部署
 
-`deploy/ib.service` 以 `ubuntu` 用户运行 release 二进制，监听 `127.0.0.1:8080`，适合配合上面的 Caddy 配置。
+`deploy/ib.service` 以 `ubuntu` 用户运行 release 二进制，监听 `127.0.0.1:8081`，适合配合上面的 Caddy 配置。
 
 ```bash
 cargo build --release
