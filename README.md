@@ -69,9 +69,12 @@ export DB_PASSWORD=...
 export DB_DSN=<tnsnames 别名>
 export DB_WALLET_DIR=/home/ubuntu/oracle/wallet
 export TNS_ADMIN=$DB_WALLET_DIR
+export DB_POOL_MAX=8
 ```
 
 钱包目录需要 `tnsnames.ora`，以及 `cwallet.sso`、`ewallet.pem` 或 `ewallet.p12` 之一。
+
+`ib serve` 使用 Oracle 连接池；`DB_POOL_MAX` 控制 Web 服务的最大连接数，默认值为 8。连接池会定期探活、等待连接超时，并回收达到生命周期的连接。`/api/health` 会实际执行数据库探活查询，数据库不可用时返回 HTTP 503。
 
 ## 模拟交易示例
 

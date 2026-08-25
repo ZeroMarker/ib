@@ -5,11 +5,12 @@ mod trading;
 mod web;
 
 use models::*;
-use oracle::{Connection, InitParams};
+use oracle::{pool::PoolBuilder, Connection, InitParams};
 use rust_decimal::Decimal;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::Duration;
 
 fn usage() -> ! {
     eprintln!(
@@ -42,12 +43,16 @@ fn decimal_arg(value: &str) -> Decimal {
     Decimal::from_str(value).unwrap_or_else(|_| usage())
 }
 
-fn connect() -> Connection {
-    let user = env::var("DB_USER").expect("DB_USER not set");
-    let password = env::var("DB_PASSWORD").expect("DB_PASSWORD not set");
-    let dsn = env::var("DB_DSN").expect("DB_DSN not set");
-    let wallet_dir = PathBuf::from(env::var("DB_WALLET_DIR").expect("DB_WALLET_DIR not set"));
+fn database_config() -> (String, String, String, PathBuf) {
+    (
+        env::var("DB_USER").expect("DB_USER not set"),
+        env::var("DB_PASSWORD").expect("DB_PASSWORD not set"),
+        env::var("DB_DSN").expect("DB_DSN not set"),
+        PathBuf::from(env::var("DB_WALLET_DIR").expect("DB_WALLET_DIR not set")),
+    )
+}
 
+fn init_oracle_client(wallet_dir: &Path) {
     assert!(
         wallet_dir.join("tnsnames.ora").is_file(),
         "wallet file missing: {}",
@@ -68,8 +73,41 @@ fn connect() -> Connection {
         .expect("invalid wallet dir")
         .init()
         .expect("Oracle client initialization failed");
+}
 
+fn connect() -> Connection {
+    let (user, password, dsn, wallet_dir) = database_config();
+    init_oracle_client(&wallet_dir);
     Connection::connect(&user, &password, &dsn).expect("Oracle connection failed")
+}
+
+fn connect_pool() -> oracle::pool::Pool {
+    let (user, password, dsn, wallet_dir) = database_config();
+    init_oracle_client(&wallet_dir);
+    let max_connections = env::var("DB_POOL_MAX")
+        .unwrap_or_else(|_| "8".into())
+        .parse::<u32>()
+        .expect("DB_POOL_MAX must be a positive integer");
+    assert!(
+        max_connections > 0,
+        "DB_POOL_MAX must be a positive integer"
+    );
+
+    let mut builder = PoolBuilder::new(user, password, dsn);
+    builder
+        .min_connections(1)
+        .max_connections(max_connections)
+        .connection_increment(1)
+        .ping_interval(Some(Duration::from_secs(60)))
+        .expect("invalid Oracle pool ping interval")
+        .ping_timeout(Duration::from_secs(5))
+        .expect("invalid Oracle pool ping timeout")
+        .timeout(Duration::from_secs(30))
+        .expect("invalid Oracle pool timeout")
+        .max_lifetime_connection(Duration::from_secs(3600))
+        .expect("invalid Oracle pool connection lifetime")
+        .stmt_cache_size(50);
+    builder.build().expect("Oracle pool initialization failed")
 }
 
 #[tokio::main]
@@ -78,6 +116,16 @@ async fn main() {
     if args.is_empty() {
         usage();
     }
+    if args[0] == "serve" {
+        let addr = args
+            .get(1)
+            .cloned()
+            .or_else(|| env::var("SERVER_ADDR").ok())
+            .unwrap_or_else(|| "127.0.0.1:8081".into());
+        auth::serve(connect_pool(), &addr).await;
+        return;
+    }
+
     let mut conn = connect();
     match args[0].as_str() {
         "ping" => {
@@ -92,14 +140,6 @@ async fn main() {
                 "simulation database connection ok: db={} schema={}",
                 db_name, schema
             );
-        }
-        "serve" => {
-            let addr = args
-                .get(1)
-                .cloned()
-                .or_else(|| env::var("SERVER_ADDR").ok())
-                .unwrap_or_else(|| "127.0.0.1:8081".into());
-            auth::serve(conn, &addr).await;
         }
         "init-db" => db::init_schema(&mut conn),
         "init-auth" => db::init_auth_schema(&mut conn),

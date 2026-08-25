@@ -264,6 +264,13 @@ pub fn place_order(conn: &Connection, o: &NewOrder) -> Result<(), String> {
 }
 
 pub fn next_order_id(conn: &Connection, account_id: &str) -> Result<i64, oracle::Error> {
+    // Serialize order-number allocation per account at the database level. The
+    // lock is held by this connection until place_order commits, so separate
+    // pooled connections cannot observe the same MAX(ORDER_ID) concurrently.
+    conn.query_row_as::<String>(
+        "SELECT ACCOUNT_ID FROM ACCOUNTS WHERE ACCOUNT_ID = :1 FOR UPDATE",
+        &[&account_id],
+    )?;
     conn.query_row_as(
         "SELECT NVL(MAX(ORDER_ID), 0) + 1 FROM ORDERS WHERE ACCOUNT_ID = :1",
         &[&account_id],

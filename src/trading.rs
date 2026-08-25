@@ -12,7 +12,6 @@ use axum::{
 };
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use std::sync::MutexGuard;
 use uuid::Uuid;
 
 #[derive(Debug, Serialize)]
@@ -148,13 +147,13 @@ fn boxed_error(status: StatusCode, message: impl Into<String>) -> Box<Response> 
     Box::new(error(status, message))
 }
 
-fn account_connection<'a>(
-    state: &'a AppState,
+fn account_connection(
+    state: &AppState,
     headers: &HeaderMap,
-) -> Result<(MutexGuard<'a, oracle::Connection>, String), Box<Response>> {
+) -> Result<(oracle::Connection, String), Box<Response>> {
     let conn = state
         .db
-        .lock()
+        .get()
         .map_err(|_| boxed_error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let user = auth::current_user(&conn, headers)
         .map_err(|_| boxed_error(StatusCode::UNAUTHORIZED, "authentication required"))?;

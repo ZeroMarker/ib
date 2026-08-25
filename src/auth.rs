@@ -10,14 +10,11 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use oracle::Connection;
+use oracle::{pool::Pool, Connection};
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{
-    net::SocketAddr,
-    sync::{Arc, Mutex},
-};
+use std::{net::SocketAddr, sync::Arc};
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "ib_session";
@@ -25,7 +22,7 @@ const SESSION_MAX_AGE: i64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone)]
 pub(crate) struct AppState {
-    pub(crate) db: Arc<Mutex<Connection>>,
+    pub(crate) db: Arc<Pool>,
 }
 
 pub(crate) struct CurrentUser {
@@ -57,16 +54,14 @@ struct ErrorResponse {
     error: &'static str,
 }
 
-pub async fn serve(conn: Connection, address: &str) {
+pub async fn serve(pool: Pool, address: &str) {
     let address: SocketAddr = address
         .parse()
         .unwrap_or_else(|_| panic!("invalid server address: {address}"));
     let listener = tokio::net::TcpListener::bind(address)
         .await
         .unwrap_or_else(|e| panic!("cannot bind {address}: {e}"));
-    let state = AppState {
-        db: Arc::new(Mutex::new(conn)),
-    };
+    let state = AppState { db: Arc::new(pool) };
     let app = Router::new()
         .route("/", get(web::index))
         .route("/login", get(web::index))
@@ -92,8 +87,15 @@ pub async fn serve(conn: Connection, address: &str) {
         .unwrap_or_else(|e| panic!("HTTP server failed: {e}"));
 }
 
-async fn health() -> Response {
-    Json(MessageResponse { message: "ok" }).into_response()
+async fn health(State(state): State<AppState>) -> Response {
+    match state
+        .db
+        .get()
+        .and_then(|conn| conn.query_row_as::<i64>("SELECT 1 FROM dual", &[]))
+    {
+        Ok(1) => Json(MessageResponse { message: "ok" }).into_response(),
+        Ok(_) | Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+    }
 }
 
 async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest>) -> Response {
@@ -115,7 +117,7 @@ async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest
         }
     };
     let user_id = Uuid::new_v4().to_string();
-    let conn = match state.db.lock() {
+    let conn = match state.db.get() {
         Ok(conn) => conn,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
@@ -172,7 +174,7 @@ async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) 
         Ok(email) => email,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    let conn = match state.db.lock() {
+    let conn = match state.db.get() {
         Ok(conn) => conn,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
@@ -212,7 +214,7 @@ async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) 
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(token) = session_token(&headers) {
-        if let Ok(conn) = state.db.lock() {
+        if let Ok(conn) = state.db.get() {
             let token_hash = hash_token(&token);
             let _ = conn.execute(
                 "DELETE FROM SESSIONS WHERE TOKEN_HASH = :1",
@@ -226,7 +228,7 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let conn = match state.db.lock() {
+    let conn = match state.db.get() {
         Ok(conn) => conn,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
