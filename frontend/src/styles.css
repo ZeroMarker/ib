@@ -133,6 +133,7 @@ button:disabled { cursor: wait; opacity: .6; }
 .view-intro h2 { margin: 0 0 4px; font-size: 18px; letter-spacing: -.04em; }.view-intro p:not(.eyebrow) { margin: 0; color: var(--muted); font-size: 11px; }.view-intro .quiet-link { margin-left: auto; white-space: nowrap; }
 .single-data-page { margin-top: 24px; }.single-data-page .data-panel { min-height: 300px; }
 .workspace-nav a.active { color: var(--green-dark); background: rgba(214,240,138,.52); font-weight: 700; }
+.mobile-nav { display: none; }
 footer { display: flex; justify-content: center; gap: 8px; padding: 26px 0 4px; }
 
 @media (max-width: 1080px) {
@@ -152,6 +153,13 @@ footer { display: flex; justify-content: center; gap: 8px; padding: 26px 0 4px; 
   .header-actions { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
   .header-actions .sync-pill { order: 3; }
   .header-actions .user-pill { max-width: 160px; }
+  .workspace-nav { display: none; }
+  .mobile-nav { position: fixed; right: 10px; bottom: max(10px, env(safe-area-inset-bottom)); left: 10px; z-index: 8; display: grid; grid-template-columns: repeat(5, 1fr); padding: 6px; background: rgba(23,45,39,.96); border: 1px solid rgba(255,255,255,.12); border-radius: 15px; box-shadow: 0 12px 35px rgba(23,45,39,.25); backdrop-filter: blur(16px); }
+  .mobile-nav a { display: grid; min-height: 44px; place-items: center; align-content: center; gap: 2px; color: #9ebdaf; border-radius: 10px; font-size: 9px; text-decoration: none; }
+  .mobile-nav a span { color: #7f9f90; font-size: 16px; line-height: 1; }
+  .mobile-nav a.active { color: #183d30; background: var(--lime); font-weight: 800; }
+  .mobile-nav a.active span { color: #183d30; }
+  .dashboard-content { padding-bottom: 76px; }
   .account-hero { min-height: 0; padding: 22px 20px; }
   .account-visual { display: none; }
   .account-meta { gap: 13px; }
@@ -162,4 +170,33 @@ footer { display: flex; justify-content: center; gap: 8px; padding: 26px 0 4px; 
   .watchlist-panel { padding: 14px; }
   .panel-heading-note { display: none; }
   footer { flex-wrap: wrap; }
+}
+@media (max-width: 520px) {
+  .dashboard-page { width: calc(100% - 20px); }
+  .dashboard-header { gap: 12px; }
+  .dashboard-header .brand-line h1 { font-size: 20px; }
+  .dashboard-header .eyebrow { font-size: 9px; }
+  .header-actions { width: 100%; }
+  .header-actions .install-button { order: 4; width: 100%; }
+  .header-actions .user-pill { flex: 1; min-width: 0; }
+  .sync-pill { order: 2; }
+  .metric-grid { grid-template-columns: 1fr 1fr; gap: 7px; }
+  .metric-card { min-height: 94px; padding: 12px; }
+  .metric-card strong { font-size: 19px; }
+  .metric-top span, .metric-card small { font-size: 9px; }
+  .account-hero h2 { font-size: 24px; }
+  .account-hero p { font-size: 11px; line-height: 1.55; }
+  .account-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 13px 10px; }
+  .insight-card { padding: 16px; }
+  .insight-copy h2 { font-size: 18px; }
+  .insight-copy > p:not(.eyebrow) { font-size: 11px; }
+  .field-row { grid-template-columns: 1fr; gap: 0; }
+  .trade-panel, .data-panel { padding: 14px; border-radius: 13px; }
+  .table-wrap { margin: 0 -4px; }
+  .table-toolbar { gap: 7px; }
+  .filter-tabs { width: 100%; }
+  .filter-tab { flex: 1; padding-right: 5px; padding-left: 5px; }
+  .view-intro h2 { font-size: 16px; }
+  .view-intro p:not(.eyebrow) { line-height: 1.45; }
+  footer { font-size: 9px; }
 }
