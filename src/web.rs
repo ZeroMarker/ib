@@ -64,3 +64,11 @@ pub async fn icon_512() -> Response {
     )
         .into_response()
 }
+
+pub async fn icon_svg() -> Response {
+    (
+        [(header::CONTENT_TYPE, "image/svg+xml")],
+        include_str!("../frontend/dist/icons/icon.svg"),
+    )
+        .into_response()
+}

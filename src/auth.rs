@@ -77,6 +77,7 @@ pub async fn serve(conn: Connection, address: &str) {
         .route("/sw.js", get(web::service_worker))
         .route("/icons/icon-192.png", get(web::icon_192))
         .route("/icons/icon-512.png", get(web::icon_512))
+        .route("/icons/icon.svg", get(web::icon_svg))
         .route("/api/health", get(health))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
