@@ -69,7 +69,9 @@ ib init-db
 ib account add U1234567 MARGIN
 ib contract add 265598 AAPL STK SMART USD
 ib order place 1 U1234567 265598 BUY LMT 100 185.50
-ib fill add 1 U1234567 185.52        # 全部成交，联动持仓与现金
+ib fill add 1 U1234567 185.52 EX-20260825-0001
 ib position list U1234567
 ib cash list U1234567
 ```
+
+数量、价格和现金金额最多支持 6 位小数。`EXEC_ID` 用于成交幂等：重试同一成交时必须传入相同的 ID，重复请求不会重复更新持仓和现金。

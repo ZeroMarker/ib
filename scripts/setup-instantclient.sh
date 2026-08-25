@@ -8,15 +8,27 @@ version=23.26.3.0.0
 base="https://download.oracle.com/otn_software/linux/instantclient/2326300"
 prefix="$HOME/instantclient"
 
+case "$arch" in
+  linux.arm64|linux.x64) ;;
+  *) echo "unsupported architecture: $arch (use linux.arm64 or linux.x64)" >&2; exit 2 ;;
+esac
+
 mkdir -p "$prefix"
+tmp_dir=$(mktemp -d)
+trap 'rm -rf "$tmp_dir"' EXIT
 for z in basiclite sdk; do
   url="$base/instantclient-${z}-${arch}-${version}.zip"
   echo "downloading $url"
-  curl -fsSL "$url" -o "/tmp/opencode/${z}.zip"
-  unzip -qo "/tmp/opencode/${z}.zip" -d "$prefix"
+  curl -fsSL "$url" -o "$tmp_dir/${z}.zip"
+  unzip -qo "$tmp_dir/${z}.zip" -d "$prefix"
 done
 
-dir=$(echo "$prefix"/instantclient* | head -1)
+dir=$(find "$prefix" -mindepth 1 -maxdepth 1 -type d -name 'instantclient_*' -print \
+  | sort -V | tail -n 1)
+if [[ -z "$dir" ]]; then
+  echo "could not locate extracted Instant Client directory under $prefix" >&2
+  exit 1
+fi
 cat <<EOF
 
 Installed at: $dir

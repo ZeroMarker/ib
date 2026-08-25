@@ -7,6 +7,7 @@ description = "IBKR-style account/order/position database model on Oracle Autono
 [dependencies]
 oracle = "0.6"
 chrono = "0.4"
+rust_decimal = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 strip = true

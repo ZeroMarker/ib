@@ -1,3 +1,5 @@
+use rust_decimal::Decimal;
+
 #[derive(Debug, Clone)]
 pub struct Contract {
     pub conid: i64,
@@ -22,9 +24,9 @@ pub struct NewOrder {
     pub conid: i64,
     pub side: String,
     pub order_type: String,
-    pub quantity: f64,
-    pub lmt_price: Option<f64>,
-    pub aux_price: Option<f64>,
+    pub quantity: Decimal,
+    pub lmt_price: Option<Decimal>,
+    pub aux_price: Option<Decimal>,
 }
 
 #[derive(Debug)]
@@ -35,10 +37,10 @@ pub struct Order {
     pub conid: i64,
     pub side: String,
     pub order_type: String,
-    pub total_quantity: f64,
-    pub filled_quantity: f64,
-    pub lmt_price: Option<f64>,
-    pub aux_price: Option<f64>,
+    pub total_quantity: Decimal,
+    pub filled_quantity: Decimal,
+    pub lmt_price: Option<Decimal>,
+    pub aux_price: Option<Decimal>,
     pub status: String,
 }
 
@@ -47,20 +49,20 @@ pub struct NewFill {
     pub exec_id: String,
     pub order_id: i64,
     pub account_id: String,
-    pub price: f64,
+    pub price: Decimal,
 }
 
 #[derive(Debug)]
 pub struct Position {
     pub account_id: String,
     pub conid: i64,
-    pub position: f64,
-    pub avg_cost: Option<f64>,
+    pub position: Decimal,
+    pub avg_cost: Option<Decimal>,
 }
 
 #[derive(Debug)]
 pub struct CashBalance {
     pub account_id: String,
     pub currency: String,
-    pub cash: f64,
+    pub cash: Decimal,
 }
