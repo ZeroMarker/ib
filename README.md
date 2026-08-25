@@ -56,7 +56,7 @@ ln -sf /usr/lib/aarch64-linux-gnu/libaio.so.1t64 \
 export DB_USER=APP_USER
 export DB_PASSWORD=...
 export DB_DSN=<tnsnames 别名>
-export DB_WALLET_DIR=/home/ubuntu/oracle/wallet
+export DB_WALLET_DIR=/home/ubuntu/oracle
 export TNS_ADMIN=$DB_WALLET_DIR
 ```
 
