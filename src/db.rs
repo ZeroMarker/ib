@@ -11,6 +11,22 @@ fn exec(conn: &Connection, sql: &str, params: &[&dyn oracle::sql_type::ToSql]) {
         .unwrap_or_else(|e| panic!("SQL failed: {e}\n{sql}"));
 }
 
+fn apply_migration(conn: &Connection, sql: &str, name: &str) {
+    for part in sql.split(';') {
+        let stmt: String = part
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("--"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string();
+        if !stmt.is_empty() {
+            exec(conn, &stmt, &[]);
+            println!("ok [{name}]: {}", stmt.lines().next().unwrap_or("").trim());
+        }
+    }
+}
+
 fn rows(
     stmt: &mut Statement,
     params: &[&dyn oracle::sql_type::ToSql],
@@ -49,26 +65,34 @@ fn scaled_round(value: &Decimal) -> Result<i64, Box<dyn Error>> {
 }
 
 pub fn init_schema(conn: &mut Connection) {
-    let sql = include_str!("../migrations/001_simulation_schema.sql");
-    for part in sql.split(';') {
-        let stmt: String = part
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-        if !stmt.is_empty() {
-            exec(conn, &stmt, &[]);
-            println!("ok: {}", stmt.lines().next().unwrap_or("").trim());
-        }
-    }
+    apply_migration(
+        conn,
+        include_str!("../migrations/001_simulation_schema.sql"),
+        "001_simulation_schema.sql",
+    );
+    apply_migration(
+        conn,
+        include_str!("../migrations/002_auth_schema.sql"),
+        "002_auth_schema.sql",
+    );
     conn.commit().unwrap();
     println!("schema created");
 }
 
+pub fn init_auth_schema(conn: &mut Connection) {
+    apply_migration(
+        conn,
+        include_str!("../migrations/002_auth_schema.sql"),
+        "002_auth_schema.sql",
+    );
+    conn.commit().unwrap();
+    println!("auth schema created");
+}
+
 pub fn drop_schema(conn: &mut Connection) {
     for table in [
+        "SESSIONS",
+        "USERS",
         "CASH_BALANCES",
         "POSITIONS",
         "FILLS",

@@ -1,0 +1,12 @@
+20070809.xyz {
+	encode zstd gzip
+
+	redir /public/ibkr /public/ibkr/ 308
+
+	# Caddy removes /public/ibkr/ before forwarding to the Rust service.
+	handle_path /public/ibkr/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+
+	respond 404
+}

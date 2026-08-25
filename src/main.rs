@@ -1,3 +1,4 @@
+mod auth;
 mod db;
 mod models;
 
@@ -14,7 +15,9 @@ fn usage() -> ! {
 
 commands:
   ping                                test Oracle connection
+  serve [ADDR]                        run HTTP auth API (default 127.0.0.1:8080)
   init-db                             create simulation trading schema
+  init-auth                           add user and session tables to an existing database
   drop-db                             drop all schema tables
   account add <ACCOUNT_ID> [TYPE]     TYPE: CASH|MARGIN|IRA
   account list
@@ -67,7 +70,8 @@ fn connect() -> Connection {
     Connection::connect(&user, &password, &dsn).expect("Oracle connection failed")
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
         usage();
@@ -87,7 +91,16 @@ fn main() {
                 db_name, schema
             );
         }
+        "serve" => {
+            let addr = args
+                .get(1)
+                .cloned()
+                .or_else(|| env::var("SERVER_ADDR").ok())
+                .unwrap_or_else(|| "127.0.0.1:8080".into());
+            auth::serve(conn, &addr).await;
+        }
         "init-db" => db::init_schema(&mut conn),
+        "init-auth" => db::init_auth_schema(&mut conn),
         "drop-db" => db::drop_schema(&mut conn),
         "account" => match args.get(1).map(String::as_str) {
             Some("add") => {

@@ -81,3 +81,33 @@ ib cash list U1234567
 ```
 
 `fill add` 当前会把订单剩余数量一次性成交，适合作为最小纸上交易闭环。自动撮合、行情驱动成交、手续费、保证金和风控尚未纳入当前版本。
+
+新数据库使用 `ib init-db` 创建全部交易和认证表。已有交易数据库可先执行 `ib init-auth`，只追加用户和会话表，不会触碰现有交易数据。
+
+## 用户注册与登录
+
+启动 HTTP API：
+
+```bash
+export SERVER_ADDR=127.0.0.1:8080
+ib serve
+```
+
+接口包括：
+
+- `POST /api/auth/register`：`{"email":"user@example.com","password":"..."}`
+- `POST /api/auth/login`：登录并设置 HttpOnly 会话 Cookie
+- `POST /api/auth/logout`：注销当前会话
+- `GET /api/auth/me`：读取当前登录用户
+- `GET /api/health`：健康检查
+
+密码使用 Argon2 哈希，会话只在数据库保存令牌哈希。邮箱验证发送预留了 Resend TODO；在邮件适配器完成前，新用户可以直接登录，但 `email_verified` 为 `false`。
+
+## Caddy 部署
+
+`deploy/Caddyfile` 将 `https://20070809.xyz/public/ibkr/` 反向代理到本机的 `127.0.0.1:8080`，并移除外部路径前缀。启动服务后将该配置加入 Caddy：
+
+```bash
+caddy validate --config deploy/Caddyfile
+caddy reload --config deploy/Caddyfile
+```

@@ -81,7 +81,7 @@ CREATE TABLE FILLS (
 
 CREATE INDEX IX_FILLS_ORDER ON FILLS (ORDER_ID, ACCOUNT_ID);
 
--- Real-time position snapshot per account/contract/currency
+-- Simulation position snapshot per account/contract/currency
 CREATE TABLE POSITIONS (
     ACCOUNT_ID  VARCHAR2(16)   NOT NULL,
     CONID       NUMBER(10)     NOT NULL,
@@ -94,7 +94,7 @@ CREATE TABLE POSITIONS (
     CONSTRAINT FK_POS_CONTRACT FOREIGN KEY (CONID) REFERENCES CONTRACTS (CONID)
 );
 
--- Cash balances per account currency (IB reports one row per currency)
+-- Cash balances per simulation account currency
 CREATE TABLE CASH_BALANCES (
     ACCOUNT_ID  VARCHAR2(16)   NOT NULL,
     CURRENCY    VARCHAR2(3)    NOT NULL,
