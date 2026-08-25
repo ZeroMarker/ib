@@ -1,4 +1,4 @@
--- IBKR-style account / order / position schema for Oracle Database
+-- Simulation trading platform account / order / position schema for Oracle Database
 -- Run via: ib init-db
 
 CREATE TABLE CONTRACTS (
@@ -27,7 +27,7 @@ CREATE TABLE ACCOUNTS (
     CONSTRAINT CK_ACCOUNTS_STATUS CHECK (STATUS IN ('ACTIVE','CLOSED','RESTRICTED'))
 );
 
--- IBKR order states
+-- Simulation order states, compatible with common broker terminology
 CREATE TABLE ORDERS (
     PERM_ID        NUMBER(12)      DEFAULT NULL,  -- assigned on acceptance
     ORDER_ID       NUMBER(10)      NOT NULL,      -- client-side id

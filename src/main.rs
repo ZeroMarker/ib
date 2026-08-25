@@ -14,7 +14,7 @@ fn usage() -> ! {
 
 commands:
   ping                                test Oracle connection
-  init-db                             create IBKR-style schema
+  init-db                             create simulation trading schema
   drop-db                             drop all schema tables
   account add <ACCOUNT_ID> [TYPE]     TYPE: CASH|MARGIN|IRA
   account list
@@ -82,7 +82,10 @@ fn main() {
                     &[],
                 )
                 .expect("query failed");
-            println!("Oracle connection ok: db={} schema={}", db_name, schema);
+            println!(
+                "simulation database connection ok: db={} schema={}",
+                db_name, schema
+            );
         }
         "init-db" => db::init_schema(&mut conn),
         "drop-db" => db::drop_schema(&mut conn),

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Oracle Instant Client (required by the Rust `oracle` crate).
+# Install Oracle Instant Client for the simulation platform database client.
 # Usage: ./scripts/setup-instantclient.sh [linux.arm64|linux.x64]
 set -euo pipefail
 

@@ -49,7 +49,7 @@ fn scaled_round(value: &Decimal) -> Result<i64, Box<dyn Error>> {
 }
 
 pub fn init_schema(conn: &mut Connection) {
-    let sql = include_str!("../migrations/001_ibkr_schema.sql");
+    let sql = include_str!("../migrations/001_simulation_schema.sql");
     for part in sql.split(';') {
         let stmt: String = part
             .lines()
