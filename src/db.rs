@@ -119,6 +119,33 @@ pub fn add_account(conn: &Connection, account_id: &str, account_type: &str) {
     conn.commit().unwrap();
 }
 
+/// Derive a stable, private simulation account ID from an authenticated user ID.
+pub fn user_account_id(user_id: &str) -> String {
+    let suffix: String = user_id
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .take(13)
+        .collect();
+    format!("SIM{suffix}")
+}
+
+/// Ensure that an authenticated user has one simulation account.
+pub fn ensure_user_account(conn: &Connection, user_id: &str) -> Result<String, oracle::Error> {
+    let account_id = user_account_id(user_id);
+    let existing: i64 = conn.query_row_as(
+        "SELECT COUNT(*) FROM ACCOUNTS WHERE ACCOUNT_ID = :1",
+        &[&account_id.as_str()],
+    )?;
+    if existing == 0 {
+        conn.execute(
+            "INSERT INTO ACCOUNTS (ACCOUNT_ID, ACCOUNT_TYPE) VALUES (:1, 'MARGIN')",
+            &[&account_id.as_str()],
+        )?;
+        conn.commit()?;
+    }
+    Ok(account_id)
+}
+
 pub fn list_accounts(conn: &Connection) -> Vec<Account> {
     let mut stmt = conn
         .statement(
@@ -138,12 +165,11 @@ pub fn list_accounts(conn: &Connection) -> Vec<Account> {
     out
 }
 
-pub fn add_contract(conn: &Connection, c: &Contract) {
+pub fn add_contract(conn: &Connection, c: &Contract) -> Result<(), String> {
     let sec_type = c.sec_type.to_uppercase();
     let exchange = c.exchange.to_uppercase();
     let currency = c.currency.to_uppercase();
-    exec(
-        conn,
+    conn.execute(
         "INSERT INTO CONTRACTS (CONID, SYMBOL, SEC_TYPE, EXCHANGE, CURRENCY) \
          VALUES (:1, :2, :3, :4, :5)",
         &[
@@ -153,8 +179,10 @@ pub fn add_contract(conn: &Connection, c: &Contract) {
             &exchange.as_str(),
             &currency.as_str(),
         ],
-    );
-    conn.commit().unwrap();
+    )
+    .map_err(|error| error.to_string())?;
+    conn.commit().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub fn list_contracts(conn: &Connection) -> Vec<Contract> {
@@ -177,45 +205,44 @@ pub fn list_contracts(conn: &Connection) -> Vec<Contract> {
     out
 }
 
-pub fn place_order(conn: &Connection, o: &NewOrder) {
-    assert!(
-        ["MKT", "LMT", "STP", "STP_LMT"].contains(&o.order_type.as_str()),
-        "unsupported order type: {}",
-        o.order_type
-    );
-    assert!(o.quantity > Decimal::ZERO, "quantity must be positive");
-    match o.order_type.as_str() {
-        "LMT" | "STP_LMT" => assert!(o.lmt_price.is_some(), "{o:?} requires LMT_PRICE"),
-        _ => {}
+pub fn place_order(conn: &Connection, o: &NewOrder) -> Result<(), String> {
+    if !["MKT", "LMT", "STP", "STP_LMT"].contains(&o.order_type.as_str()) {
+        return Err(format!("unsupported order type: {}", o.order_type));
     }
-    if o.order_type == "STP" || o.order_type == "STP_LMT" {
-        assert!(o.aux_price.is_some(), "{} requires AUX_PRICE", o.order_type);
+    if o.quantity <= Decimal::ZERO {
+        return Err("quantity must be positive".into());
     }
-    assert!(
-        ["BUY", "SELL"].contains(&o.side.as_str()),
-        "side must be BUY or SELL"
-    );
-    assert!(
-        o.lmt_price.is_none_or(|price| price > Decimal::ZERO),
-        "limit price must be positive"
-    );
-    assert!(
-        o.aux_price.is_none_or(|price| price > Decimal::ZERO),
-        "aux price must be positive"
-    );
+    if matches!(o.order_type.as_str(), "LMT" | "STP_LMT") && o.lmt_price.is_none() {
+        return Err(format!("{} requires LMT_PRICE", o.order_type));
+    }
+    if matches!(o.order_type.as_str(), "STP" | "STP_LMT") && o.aux_price.is_none() {
+        return Err(format!("{} requires AUX_PRICE", o.order_type));
+    }
+    if !["BUY", "SELL"].contains(&o.side.as_str()) {
+        return Err("side must be BUY or SELL".into());
+    }
+    if o.lmt_price.is_some_and(|price| price <= Decimal::ZERO) {
+        return Err("limit price must be positive".into());
+    }
+    if o.aux_price.is_some_and(|price| price <= Decimal::ZERO) {
+        return Err("aux price must be positive".into());
+    }
 
-    let quantity = scaled(&o.quantity).expect("invalid quantity");
+    let quantity = scaled(&o.quantity).map_err(|error| error.to_string())?;
     let lmt_price = o
         .lmt_price
         .as_ref()
-        .map(|value| scaled(value).expect("invalid limit price"));
+        .map(scaled)
+        .transpose()
+        .map_err(|error| error.to_string())?;
     let aux_price = o
         .aux_price
         .as_ref()
-        .map(|value| scaled(value).expect("invalid aux price"));
+        .map(scaled)
+        .transpose()
+        .map_err(|error| error.to_string())?;
 
-    exec(
-        conn,
+    conn.execute(
         "INSERT INTO ORDERS (ORDER_ID, ACCOUNT_ID, CONID, SIDE, ORDER_TYPE, \
                              LMT_PRICE, AUX_PRICE, TOTAL_QUANTITY, STATUS) \
          VALUES (:1, :2, :3, :4, :5, :6 / 1000000, :7 / 1000000, \
@@ -230,8 +257,76 @@ pub fn place_order(conn: &Connection, o: &NewOrder) {
             &aux_price,
             &quantity,
         ],
-    );
-    conn.commit().unwrap();
+    )
+    .map_err(|error| error.to_string())?;
+    conn.commit().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub fn next_order_id(conn: &Connection, account_id: &str) -> Result<i64, oracle::Error> {
+    conn.query_row_as(
+        "SELECT NVL(MAX(ORDER_ID), 0) + 1 FROM ORDERS WHERE ACCOUNT_ID = :1",
+        &[&account_id],
+    )
+}
+
+pub fn list_account_orders(
+    conn: &Connection,
+    account_id: &str,
+    status: Option<&str>,
+) -> Vec<Order> {
+    let sql = match status {
+        Some(_) => {
+            format!("{ORDER_SELECT} WHERE ACCOUNT_ID = :1 AND STATUS = :2 ORDER BY ORDER_ID")
+        }
+        None => format!("{ORDER_SELECT} WHERE ACCOUNT_ID = :1 ORDER BY ORDER_ID"),
+    };
+    let mut stmt = conn.statement(&sql).build().unwrap();
+    let status_param = status.map(str::to_owned);
+    let params: Vec<&dyn oracle::sql_type::ToSql> = match status_param.as_ref() {
+        Some(value) => vec![&account_id as &dyn oracle::sql_type::ToSql, value],
+        None => vec![&account_id as &dyn oracle::sql_type::ToSql],
+    };
+    let mut out = Vec::new();
+    rows(&mut stmt, &params, |r| {
+        out.push(Order {
+            order_id: r.get(0).unwrap(),
+            perm_id: r.get(1).unwrap(),
+            account_id: r.get(2).unwrap(),
+            conid: r.get(3).unwrap(),
+            side: r.get(4).unwrap(),
+            order_type: r.get(5).unwrap(),
+            total_quantity: decimal_at(r, 6),
+            filled_quantity: decimal_at(r, 7),
+            lmt_price: optional_decimal_at(r, 8),
+            aux_price: optional_decimal_at(r, 9),
+            status: r.get(10).unwrap(),
+        });
+    });
+    out
+}
+
+pub fn list_fills(conn: &Connection, account_id: &str) -> Vec<Fill> {
+    let mut stmt = conn
+        .statement(
+            "SELECT EXEC_ID, ORDER_ID, ACCOUNT_ID, CONID, SIDE, QUANTITY, PRICE \
+             FROM FILLS WHERE ACCOUNT_ID = :1 ORDER BY EXEC_TIME DESC",
+        )
+        .build()
+        .unwrap();
+    let mut out = Vec::new();
+    rows(&mut stmt, &[&account_id], |r| {
+        out.push(Fill {
+            exec_id: r.get(0).unwrap(),
+            order_id: r.get(1).unwrap(),
+            account_id: r.get(2).unwrap(),
+            conid: r.get(3).unwrap(),
+            side: r.get(4).unwrap(),
+            quantity: decimal_at(r, 5),
+            price: decimal_at(r, 6),
+        });
+    });
+    out
 }
 
 const ORDER_SELECT: &str = "SELECT ORDER_ID, PERM_ID, ACCOUNT_ID, CONID, SIDE, ORDER_TYPE, \
@@ -267,7 +362,7 @@ pub fn list_orders(conn: &Connection, status: Option<&str>) -> Vec<Order> {
     out
 }
 
-pub fn cancel_order(conn: &Connection, order_id: i64, account_id: &str) {
+pub fn cancel_order(conn: &Connection, order_id: i64, account_id: &str) -> Result<(), String> {
     let n = conn
         .execute(
             "UPDATE ORDERS SET STATUS = 'Cancelled', UPDATED_AT = SYSTIMESTAMP \
@@ -275,17 +370,20 @@ pub fn cancel_order(conn: &Connection, order_id: i64, account_id: &str) {
                AND STATUS NOT IN ('Filled','Cancelled')",
             &[&order_id, &account_id],
         )
-        .expect("cancel failed")
+        .map_err(|error| error.to_string())?
         .row_count()
         .unwrap_or(0);
-    conn.commit().unwrap();
     if n == 0 {
-        panic!("order {order_id} not cancellable in account {account_id}");
+        return Err(format!(
+            "order {order_id} not cancellable in account {account_id}"
+        ));
     }
+    conn.commit().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 /// Record a full remaining fill and roll up order, position and cash atomically.
-pub fn record_fill(conn: &Connection, f: &NewFill) {
+pub fn record_fill(conn: &Connection, f: &NewFill) -> Result<(), String> {
     let transaction = || -> Result<(), Box<dyn Error>> {
         if f.price <= Decimal::ZERO {
             return Err("fill price must be positive".into());
@@ -413,12 +511,13 @@ pub fn record_fill(conn: &Connection, f: &NewFill) {
 
     if let Err(error) = transaction() {
         let _ = conn.rollback();
-        panic!("fill failed: {error}");
+        return Err(format!("fill failed: {error}"));
     }
     if let Err(error) = conn.commit() {
         let _ = conn.rollback();
-        panic!("fill commit failed: {error}");
+        return Err(format!("fill commit failed: {error}"));
     }
+    Ok(())
 }
 
 fn contract_details(conn: &Connection, conid: i64) -> Result<(String, Decimal), Box<dyn Error>> {
@@ -452,19 +551,25 @@ pub fn set_position(
     conn.commit().unwrap();
 }
 
-pub fn set_cash(conn: &Connection, account_id: &str, currency: &str, amount: Decimal) {
-    let amount = scaled(&amount).expect("invalid cash amount");
+pub fn set_cash(
+    conn: &Connection,
+    account_id: &str,
+    currency: &str,
+    amount: Decimal,
+) -> Result<(), String> {
+    let amount = scaled(&amount).map_err(|error| error.to_string())?;
     let currency = currency.to_uppercase();
-    exec(
-        conn,
+    conn.execute(
         "MERGE INTO CASH_BALANCES B USING (SELECT :1 A, :2 CUR, \
                                                :3 / 1000000 AMT FROM dual) S \
            ON (B.ACCOUNT_ID = S.A AND B.CURRENCY = S.CUR) \
          WHEN MATCHED THEN UPDATE SET B.CASH = S.AMT, B.UPDATED_AT = SYSTIMESTAMP \
          WHEN NOT MATCHED THEN INSERT (ACCOUNT_ID, CURRENCY, CASH) VALUES (S.A, S.CUR, S.AMT)",
         &[&account_id, &currency.as_str(), &amount],
-    );
-    conn.commit().unwrap();
+    )
+    .map_err(|error| error.to_string())?;
+    conn.commit().map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 pub fn list_positions(conn: &Connection, account_id: Option<&str>) -> Vec<Position> {
@@ -547,5 +652,12 @@ mod tests {
             scaled_round(&Decimal::from_str_exact("1.0000006").unwrap()).unwrap(),
             1_000_001
         );
+    }
+
+    #[test]
+    fn user_account_id_is_stable_and_fits_account_limit() {
+        let account_id = user_account_id("9eab5226-3a10-42a8-aed1-5aea54b8b5d3");
+        assert_eq!(account_id, "SIM9eab52263a104");
+        assert_eq!(account_id.len(), 16);
     }
 }

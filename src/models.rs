@@ -66,3 +66,14 @@ pub struct CashBalance {
     pub currency: String,
     pub cash: Decimal,
 }
+
+#[derive(Debug)]
+pub struct Fill {
+    pub exec_id: String,
+    pub order_id: i64,
+    pub account_id: String,
+    pub conid: i64,
+    pub side: String,
+    pub quantity: Decimal,
+    pub price: Decimal,
+}

@@ -101,11 +101,20 @@ ib serve
 - `GET /api/auth/me`：读取当前登录用户
 - `GET /api/health`：健康检查
 
+登录后可用的模拟交易接口：
+
+- `GET /api/trading/overview`：当前用户的模拟账户、合约、订单、持仓、现金和成交
+- `GET/POST /api/trading/contracts`：查询或添加模拟合约
+- `GET/POST /api/trading/orders`：查询或提交模拟订单
+- `POST /api/trading/orders/{order_id}/cancel`：撤销当前用户的订单
+- `POST /api/trading/orders/{order_id}/fill`：注入当前用户订单的模拟成交
+- `GET /api/trading/positions`、`GET /api/trading/cash`、`POST /api/trading/cash`、`GET /api/trading/fills`
+
 密码使用 Argon2 哈希，会话只在数据库保存令牌哈希。邮箱验证发送预留了 Resend TODO；在邮件适配器完成前，新用户可以直接登录，但 `email_verified` 为 `false`。
 
 Resend 接入完成后通过 `RESEND_API_KEY` 配置密钥；当前版本不会读取或发送邮件。
 
-前端页面由同一个 Rust 服务提供，包含登录、注册、登录态恢复、用户信息和退出登录视图。直接访问 `/`，或通过 Caddy 访问 `/public/ibkr/` 即可打开页面，不需要额外的 Node.js 构建步骤。
+前端页面由同一个 Rust 服务提供，包含登录、注册、登录态恢复、用户信息、模拟账户、合约、下单、撤单、模拟成交、持仓和现金账本视图。每个登录用户按用户 ID 获得一个稳定的模拟账户。直接访问 `/`，或通过 Caddy 访问 `/public/ibkr/` 即可打开页面，不需要额外的 Node.js 构建步骤。
 
 ## Caddy 部署
 

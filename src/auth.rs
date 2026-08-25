@@ -24,8 +24,14 @@ const SESSION_COOKIE: &str = "ib_session";
 const SESSION_MAX_AGE: i64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone)]
-struct AppState {
-    db: Arc<Mutex<Connection>>,
+pub(crate) struct AppState {
+    pub(crate) db: Arc<Mutex<Connection>>,
+}
+
+pub(crate) struct CurrentUser {
+    pub user_id: String,
+    pub email: String,
+    pub email_verified: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,6 +78,7 @@ pub async fn serve(conn: Connection, address: &str) {
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
+        .merge(crate::trading::router())
         .with_state(state);
 
     println!("simulation auth API listening on http://{address}");
@@ -214,30 +221,41 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let token = match session_token(&headers) {
-        Some(token) => token,
-        None => return error(StatusCode::UNAUTHORIZED, "authentication required"),
-    };
-    let token_hash = hash_token(&token);
     let conn = match state.db.lock() {
         Ok(conn) => conn,
         Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
     };
-    let (user_id, email, verified): (String, String, i64) = match conn.query_row_as(
-        "SELECT U.USER_ID, U.EMAIL, U.EMAIL_VERIFIED \
-         FROM SESSIONS S JOIN USERS U ON U.USER_ID = S.USER_ID \
-         WHERE S.TOKEN_HASH = :1 AND S.EXPIRES_AT > SYSTIMESTAMP AND U.STATUS = 'ACTIVE'",
-        &[&token_hash.as_str()],
-    ) {
-        Ok(row) => row,
-        Err(_) => return error(StatusCode::UNAUTHORIZED, "authentication required"),
-    };
-    Json(UserResponse {
+    match current_user(&conn, &headers) {
+        Ok(user) => Json(UserResponse {
+            user_id: user.user_id,
+            email: user.email,
+            email_verified: user.email_verified,
+        })
+        .into_response(),
+        Err(status) => error(status, "authentication required"),
+    }
+}
+
+pub(crate) fn current_user(
+    conn: &Connection,
+    headers: &HeaderMap,
+) -> Result<CurrentUser, StatusCode> {
+    let token = session_token(headers).ok_or(StatusCode::UNAUTHORIZED)?;
+    let token_hash = hash_token(&token);
+    let (user_id, email, verified): (String, String, i64) = conn
+        .query_row_as(
+            "SELECT U.USER_ID, U.EMAIL, U.EMAIL_VERIFIED \
+             FROM SESSIONS S JOIN USERS U ON U.USER_ID = S.USER_ID \
+             WHERE S.TOKEN_HASH = :1 AND S.EXPIRES_AT > SYSTIMESTAMP \
+               AND U.STATUS = 'ACTIVE'",
+            &[&token_hash.as_str()],
+        )
+        .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    Ok(CurrentUser {
         user_id,
         email,
         email_verified: verified == 1,
     })
-    .into_response()
 }
 
 fn insert_session(conn: &Connection, user_id: &str) -> Result<String, oracle::Error> {

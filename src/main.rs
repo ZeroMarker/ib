@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod models;
+mod trading;
 mod web;
 
 use models::*;
@@ -16,7 +17,7 @@ fn usage() -> ! {
 
 commands:
   ping                                test Oracle connection
-  serve [ADDR]                        run web frontend and auth API (default 127.0.0.1:8080)
+  serve [ADDR]                        run web frontend and auth API (default 127.0.0.1:8081)
   init-db                             create simulation trading schema
   init-auth                           add user and session tables to an existing database
   drop-db                             drop all schema tables
@@ -97,7 +98,7 @@ async fn main() {
                 .get(1)
                 .cloned()
                 .or_else(|| env::var("SERVER_ADDR").ok())
-                .unwrap_or_else(|| "127.0.0.1:8080".into());
+                .unwrap_or_else(|| "127.0.0.1:8081".into());
             auth::serve(conn, &addr).await;
         }
         "init-db" => db::init_schema(&mut conn),
@@ -133,7 +134,8 @@ async fn main() {
                     exchange: args.get(5).cloned().unwrap_or_else(|| "SMART".into()),
                     currency: args.get(6).cloned().unwrap_or_else(|| "USD".into()),
                 };
-                db::add_contract(&conn, &c);
+                db::add_contract(&conn, &c)
+                    .unwrap_or_else(|error| panic!("contract failed: {error}"));
                 println!("contract {} {} added", c.conid, c.symbol);
             }
             Some("list") => {
@@ -161,7 +163,7 @@ async fn main() {
                     lmt_price: args.get(8).map(|s| decimal_arg(s)),
                     aux_price: args.get(9).map(|s| decimal_arg(s)),
                 };
-                db::place_order(&conn, &o);
+                db::place_order(&conn, &o).unwrap_or_else(|error| panic!("order failed: {error}"));
                 println!("order {} submitted", o.order_id);
             }
             Some("list") => {
@@ -192,7 +194,8 @@ async fn main() {
                     .parse()
                     .unwrap_or_else(|_| usage());
                 let account_id = args.get(3).cloned().unwrap_or_else(|| usage());
-                db::cancel_order(&conn, order_id, &account_id);
+                db::cancel_order(&conn, order_id, &account_id)
+                    .unwrap_or_else(|error| panic!("cancel failed: {error}"));
                 println!("order {} cancelled", order_id);
             }
             _ => usage(),
@@ -213,7 +216,7 @@ async fn main() {
                     account_id: args[3].clone(),
                     price: decimal_arg(&args[4]),
                 };
-                db::record_fill(&conn, &f);
+                db::record_fill(&conn, &f).unwrap_or_else(|error| panic!("{error}"));
                 println!("fill recorded on order {}", f.order_id);
             }
             _ => usage(),
@@ -247,7 +250,8 @@ async fn main() {
                 if args.len() < 5 {
                     usage();
                 }
-                db::set_cash(&conn, &args[2], &args[3], decimal_arg(&args[4]));
+                db::set_cash(&conn, &args[2], &args[3], decimal_arg(&args[4]))
+                    .unwrap_or_else(|error| panic!("cash update failed: {error}"));
                 println!("balance updated");
             }
             Some("list") => {

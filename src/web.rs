@@ -79,12 +79,50 @@ const INDEX_HTML: &str = r##"<!doctype html>
         </div>
         <div class="user-pill"><span class="status-dot"></span><span id="user-email"></span></div>
         <div class="verify-note" id="verify-note"></div>
-        <div class="stat-grid">
-          <div class="stat-card"><span>账户</span><strong>模拟账户</strong><small>准备开始</small></div>
-          <div class="stat-card"><span>持仓</span><strong>—</strong><small>尚未建立</small></div>
-          <div class="stat-card"><span>订单</span><strong>—</strong><small>等待策略接入</small></div>
+        <div class="account-banner">
+          <span>模拟账户</span><strong id="account-id">—</strong><small id="account-meta">加载中…</small>
         </div>
-        <p class="dashboard-note">交易 API 和账本服务已就绪，行情驱动撮合、手续费与风控模块将逐步接入。</p>
+        <div class="trade-layout">
+          <section class="trade-panel">
+            <div class="panel-heading"><div><p class="eyebrow">PAPER ORDER</p><h3>提交模拟订单</h3></div></div>
+            <form id="contract-form" class="compact-form contract-form">
+              <label>新增合约</label>
+              <div class="field-row"><input id="contract-conid" inputmode="numeric" placeholder="ConID" required><input id="contract-symbol" placeholder="AAPL" required></div>
+              <div class="field-row"><input id="contract-exchange" value="SMART" placeholder="交易所"><input id="contract-currency" value="USD" maxlength="3" placeholder="币种"></div>
+              <button class="secondary-button" type="submit">添加合约</button>
+              <p class="form-message" id="contract-message" role="alert"></p>
+            </form>
+            <form id="order-form" class="compact-form">
+              <label for="contract">合约</label>
+              <select id="contract" required><option value="">请选择合约</option></select>
+              <div class="field-row">
+                <div><label for="side">方向</label><select id="side"><option>BUY</option><option>SELL</option></select></div>
+                <div><label for="order-type">类型</label><select id="order-type"><option>MKT</option><option>LMT</option><option>STP</option><option>STP_LMT</option></select></div>
+              </div>
+              <div class="field-row">
+                <div><label for="quantity">数量</label><input id="quantity" inputmode="decimal" value="100" required></div>
+                <div><label for="price">价格</label><input id="price" inputmode="decimal" placeholder="市价可留空"></div>
+              </div>
+              <button class="primary-button" type="submit" id="order-submit">提交订单</button>
+              <p class="form-message" id="trade-message" role="alert"></p>
+            </form>
+          </section>
+          <section class="trade-panel">
+            <div class="panel-heading"><div><p class="eyebrow">CASH LEDGER</p><h3>现金账本</h3></div></div>
+            <form id="cash-form" class="compact-form">
+              <div class="field-row"><div><label for="cash-currency">币种</label><input id="cash-currency" value="USD" maxlength="3" required></div><div><label for="cash-amount">余额</label><input id="cash-amount" inputmode="decimal" value="100000" required></div></div>
+              <button class="secondary-button" type="submit">设置模拟余额</button>
+              <p class="form-message" id="cash-message" role="alert"></p>
+            </form>
+            <div id="cash-list" class="mini-list"><span class="muted">暂无余额</span></div>
+          </section>
+        </div>
+        <section class="data-panel"><div class="panel-heading"><div><p class="eyebrow">ORDERS</p><h3>订单</h3></div><button class="text-button" id="refresh-button">刷新</button></div><div class="table-wrap"><table><thead><tr><th>订单</th><th>合约</th><th>方向</th><th>数量</th><th>状态</th><th></th></tr></thead><tbody id="orders-body"><tr><td colspan="6" class="muted">暂无订单</td></tr></tbody></table></div></section>
+        <div class="data-columns">
+          <section class="data-panel"><div class="panel-heading"><div><p class="eyebrow">POSITIONS</p><h3>持仓</h3></div></div><div class="table-wrap"><table><thead><tr><th>合约</th><th>数量</th><th>平均成本</th></tr></thead><tbody id="positions-body"><tr><td colspan="3" class="muted">暂无持仓</td></tr></tbody></table></div></section>
+          <section class="data-panel"><div class="panel-heading"><div><p class="eyebrow">FILLS</p><h3>成交</h3></div></div><div class="table-wrap"><table><thead><tr><th>执行 ID</th><th>订单</th><th>数量</th><th>价格</th></tr></thead><tbody id="fills-body"><tr><td colspan="4" class="muted">暂无成交</td></tr></tbody></table></div></section>
+        </div>
+        <p class="dashboard-note">当前为模拟交易：订单可撤销或注入成交，不会发送真实订单；行情撮合、手续费与风控仍未接入。</p>
       </div>
     </section>
   </main>
@@ -248,6 +286,34 @@ input:focus { border-color: var(--green); box-shadow: 0 0 0 4px rgba(29, 112, 85
 .stat-card { min-height: 105px; padding: 13px; background: #f5f8f4; border-radius: 13px; }
 .stat-card span, .stat-card small { display: block; color: var(--muted); font-size: 11px; }
 .stat-card strong { display: block; margin: 13px 0 4px; font-size: 16px; }
+.account-banner { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; align-items: baseline; margin-top: 27px; padding: 14px 16px; background: #f5f8f4; border-radius: 13px; }
+.account-banner span, .account-banner small { color: var(--muted); font-size: 11px; }
+.account-banner strong { font-size: 15px; }
+.account-banner small { grid-column: 1 / -1; }
+.trade-layout, .data-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.trade-panel, .data-panel { padding: 16px; background: rgba(245, 248, 244, .8); border-radius: 15px; }
+.data-panel { margin-top: 10px; }
+.panel-heading { display: flex; justify-content: space-between; align-items: start; gap: 12px; margin-bottom: 12px; }
+.panel-heading .eyebrow { margin-bottom: 5px; }
+.panel-heading h3 { margin: 0; font-size: 16px; letter-spacing: -.03em; }
+.compact-form { margin-top: 0; }
+.field-row { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; }
+select { width: 100%; padding: 13px 12px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 11px; font: inherit; }
+.compact-form label { margin-top: 12px; }
+.compact-form input, .compact-form select { padding: 11px 12px; font-size: 13px; }
+.compact-form .primary-button, .secondary-button { margin-top: 16px; padding: 12px; }
+.secondary-button { width: 100%; color: var(--green-dark); background: var(--lime); border: 0; border-radius: 11px; cursor: pointer; font: inherit; font-size: 13px; font-weight: 700; }
+.secondary-button:hover { filter: brightness(.97); }
+.mini-list { margin-top: 18px; }
+.mini-list div { display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12px; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 11px; white-space: nowrap; }
+th { color: var(--muted); font-size: 10px; font-weight: 700; text-align: left; }
+th, td { padding: 8px 5px; border-bottom: 1px solid var(--line); }
+td { color: var(--ink); }
+.table-action { padding: 4px 7px; color: var(--green); background: transparent; border: 1px solid var(--line); border-radius: 6px; cursor: pointer; font: inherit; font-size: 10px; }
+.fill-action { margin-left: 4px; }
+.muted { color: var(--muted); }
 footer { padding: 0 24px 25px; color: #9aa8a2; text-align: center; font-size: 11px; }
 
 @media (max-width: 800px) {
@@ -257,6 +323,7 @@ footer { padding: 0 24px 25px; color: #9aa8a2; text-align: center; font-size: 11
   h1 { font-size: clamp(43px, 13vw, 68px); }
   .hero-copy { font-size: 16px; }
   .auth-card { min-height: 0; margin-bottom: 35px; }
+  .trade-layout, .data-columns { grid-template-columns: 1fr; }
 }
 "##;
 
@@ -270,7 +337,11 @@ const APP_JS: &str = r##"(() => {
   const submit = document.querySelector('#submit-button');
   const email = document.querySelector('#email');
   const password = document.querySelector('#password');
+  const contractForm = document.querySelector('#contract-form');
+  const orderForm = document.querySelector('#order-form');
+  const cashForm = document.querySelector('#cash-form');
   let mode = 'login';
+  let snapshot = null;
 
   function setMode(next) {
     mode = next;
@@ -282,13 +353,8 @@ const APP_JS: &str = r##"(() => {
     message.textContent = '';
   }
 
-  function showDashboard(user) {
-    authView.classList.add('hidden');
-    dashboardView.classList.remove('hidden');
-    document.querySelector('#user-email').textContent = user.email;
-    document.querySelector('#verify-note').textContent = user.email_verified
-      ? '邮箱已验证。'
-      : '邮箱验证将在 Resend 邮件服务接入后开放。';
+  function escapeHtml(value) {
+    return String(value ?? '').replace(/[&<>'"]/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[character]));
   }
 
   async function request(path, options = {}) {
@@ -298,6 +364,45 @@ const APP_JS: &str = r##"(() => {
     return data;
   }
 
+  function showDashboard(user) {
+    authView.classList.add('hidden');
+    dashboardView.classList.remove('hidden');
+    document.querySelector('#user-email').textContent = user.email;
+    document.querySelector('#verify-note').textContent = user.email_verified
+      ? '邮箱已验证。'
+      : '邮箱验证将在 Resend 邮件服务接入后开放。';
+    loadOverview();
+  }
+
+  function renderOverview(data) {
+    snapshot = data;
+    document.querySelector('#account-id').textContent = data.account.account_id;
+    document.querySelector('#account-meta').textContent = `${data.account.account_type} · ${data.account.currency} · ${data.account.status}`;
+    const contractSelect = document.querySelector('#contract');
+    contractSelect.innerHTML = '<option value="">请选择合约</option>' + data.contracts.map((contract) =>
+      `<option value="${contract.conid}">${escapeHtml(contract.symbol)} · ${escapeHtml(contract.sec_type)} · ${escapeHtml(contract.exchange)}</option>`).join('');
+    document.querySelector('#cash-list').innerHTML = data.cash.length
+      ? data.cash.map((item) => `<div><span>${escapeHtml(item.currency)}</span><strong>${escapeHtml(item.cash)}</strong></div>`).join('')
+      : '<span class="muted">暂无余额，可在上方设置模拟余额。</span>';
+    const contractName = (conid) => data.contracts.find((item) => item.conid === conid)?.symbol || `#${conid}`;
+    document.querySelector('#orders-body').innerHTML = data.orders.length ? data.orders.map((order) => {
+      const actions = order.status === 'Submitted' || order.status === 'PreSubmitted'
+        ? `<button class="table-action" data-action="cancel" data-order="${order.order_id}">撤单</button><button class="table-action fill-action" data-action="fill" data-order="${order.order_id}">成交</button>` : '';
+      return `<tr><td>#${order.order_id}</td><td>${escapeHtml(contractName(order.conid))}</td><td>${escapeHtml(order.side)}</td><td>${escapeHtml(order.total_quantity)}</td><td>${escapeHtml(order.status)}</td><td>${actions}</td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="muted">暂无订单</td></tr>';
+    document.querySelector('#positions-body').innerHTML = data.positions.length ? data.positions.map((item) =>
+      `<tr><td>${escapeHtml(contractName(item.conid))}</td><td>${escapeHtml(item.position)}</td><td>${escapeHtml(item.avg_cost || '—')}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="muted">暂无持仓</td></tr>';
+    document.querySelector('#fills-body').innerHTML = data.fills.length ? data.fills.map((item) =>
+      `<tr><td>${escapeHtml(item.exec_id)}</td><td>#${item.order_id}</td><td>${escapeHtml(item.quantity)}</td><td>${escapeHtml(item.price)}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="muted">暂无成交</td></tr>';
+  }
+
+  async function loadOverview() {
+    try { renderOverview(await request('api/trading/overview')); }
+    catch (error) { document.querySelector('#trade-message').textContent = error.message; }
+  }
+
   document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => setMode(tab.dataset.mode)));
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
@@ -305,24 +410,70 @@ const APP_JS: &str = r##"(() => {
     submit.disabled = true;
     try {
       const user = await request(`api/auth/${mode}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: email.value, password: password.value }),
       });
       showDashboard(user);
-    } catch (error) {
-      message.textContent = error.message;
-    } finally {
-      submit.disabled = false;
-    }
+    } catch (error) { message.textContent = error.message; }
+    finally { submit.disabled = false; }
   });
 
+  orderForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const type = document.querySelector('#order-type').value;
+    const price = document.querySelector('#price').value.trim();
+    const payload = { conid: Number(document.querySelector('#contract').value), side: document.querySelector('#side').value, order_type: type, quantity: document.querySelector('#quantity').value, lmt_price: type === 'LMT' ? price || null : null, aux_price: null };
+    try {
+      await request('api/trading/orders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      document.querySelector('#trade-message').textContent = '订单已提交。';
+      await loadOverview();
+    } catch (error) { document.querySelector('#trade-message').textContent = error.message; }
+  });
+
+  contractForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      await request('api/trading/contracts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+        conid: Number(document.querySelector('#contract-conid').value), symbol: document.querySelector('#contract-symbol').value,
+        sec_type: 'STK', exchange: document.querySelector('#contract-exchange').value, currency: document.querySelector('#contract-currency').value,
+      }) });
+      document.querySelector('#contract-message').textContent = '合约已添加。';
+      contractForm.reset();
+      document.querySelector('#contract-exchange').value = 'SMART';
+      document.querySelector('#contract-currency').value = 'USD';
+      await loadOverview();
+    } catch (error) { document.querySelector('#contract-message').textContent = error.message; }
+  });
+
+  cashForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    try {
+      await request('api/trading/cash', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ currency: document.querySelector('#cash-currency').value, amount: document.querySelector('#cash-amount').value }) });
+      document.querySelector('#cash-message').textContent = '余额已更新。';
+      await loadOverview();
+    } catch (error) { document.querySelector('#cash-message').textContent = error.message; }
+  });
+
+  document.querySelector('#orders-body').addEventListener('click', async (event) => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+    const orderId = button.dataset.order;
+    try {
+      if (button.dataset.action === 'cancel') {
+        await request(`api/trading/orders/${orderId}/cancel`, { method: 'POST' });
+      } else {
+        const price = window.prompt('请输入模拟成交价格');
+        if (!price) return;
+        await request(`api/trading/orders/${orderId}/fill`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ price }) });
+      }
+      await loadOverview();
+    } catch (error) { document.querySelector('#trade-message').textContent = error.message; }
+  });
+
+  document.querySelector('#refresh-button').addEventListener('click', loadOverview);
   document.querySelector('#logout-button').addEventListener('click', async () => {
     await request('api/auth/logout', { method: 'POST' }).catch(() => {});
-    dashboardView.classList.add('hidden');
-    authView.classList.remove('hidden');
-    form.reset();
-    setMode('login');
+    dashboardView.classList.add('hidden'); authView.classList.remove('hidden'); form.reset(); setMode('login');
   });
 
   request('api/auth/me').then(showDashboard).catch(() => {});
