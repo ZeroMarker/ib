@@ -32,6 +32,17 @@
 
 ## 构建
 
+前端使用 Vite + React + TypeScript，构建产物会被 Rust 服务嵌入二进制：
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+```
+
+然后构建后端：
+
 ```bash
 cargo build --release
 ```
@@ -130,6 +141,7 @@ caddy reload --config deploy/Caddyfile
 `deploy/ib.service` 以 `ubuntu` 用户运行 release 二进制，监听 `127.0.0.1:8081`，适合配合上面的 Caddy 配置。
 
 ```bash
+cd frontend && npm ci && npm run build && cd ..
 cargo build --release
 sudo install -d -m 0750 /etc/ib
 sudo install -o root -g ubuntu -m 0640 deploy/ib.env.example /etc/ib/ib.env
