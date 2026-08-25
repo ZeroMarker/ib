@@ -1,0 +1,17 @@
+{
+  "name": "ib 模拟交易平台",
+  "short_name": "ib Paper",
+  "description": "用于策略开发和纸上交易的模拟交易平台",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f5f8f4",
+  "theme_color": "#1d7055",
+  "categories": ["finance", "productivity"],
+  "icons": [
+    { "src": "./icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

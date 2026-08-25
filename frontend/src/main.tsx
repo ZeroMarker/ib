@@ -24,6 +24,7 @@ function App() {
   const [booting, setBooting] = useState(true)
 
   useEffect(() => {
+    if ('serviceWorker' in navigator) navigator.serviceWorker.register('./sw.js').catch(() => {})
     api<AuthUser>('auth/me').then(setUser).catch(() => {}).finally(() => setBooting(false))
   }, [])
 

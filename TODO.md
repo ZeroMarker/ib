@@ -16,6 +16,7 @@
 - [x] 将交易数据接入前端 Dashboard。
 - [x] 增加交易 API 的输入校验和基础测试。
 - [x] 将内嵌原生前端迁移到 Vite + React + TypeScript。
+- [x] 增加 PWA Manifest、图标、Service Worker 和移动端安全区域适配。
 
 ## 外部依赖待办
 
