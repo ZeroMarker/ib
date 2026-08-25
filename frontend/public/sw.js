@@ -1,5 +1,5 @@
-const CACHE_NAME = 'ib-shell-v2'
-const ASSET_VERSION = '20260825-ux2'
+const CACHE_NAME = 'ib-shell-v3'
+const ASSET_VERSION = '20260825-ux3'
 const SHELL = [
   './',
   `./manifest.webmanifest?v=${ASSET_VERSION}`,
