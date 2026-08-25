@@ -1,11 +1,12 @@
-const CACHE_NAME = 'ib-shell-v1'
+const CACHE_NAME = 'ib-shell-v2'
+const ASSET_VERSION = '20260825-ux2'
 const SHELL = [
   './',
-  './manifest.webmanifest',
-  './assets/app.js',
-  './assets/index.css',
-  './icons/icon-192.png',
-  './icons/icon-512.png',
+  `./manifest.webmanifest?v=${ASSET_VERSION}`,
+  `./assets/app.js?v=${ASSET_VERSION}`,
+  `./assets/index.css?v=${ASSET_VERSION}`,
+  `./icons/icon-192.png?v=${ASSET_VERSION}`,
+  `./icons/icon-512.png?v=${ASSET_VERSION}`,
 ]
 
 self.addEventListener('install', (event) => {
