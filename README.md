@@ -115,3 +115,26 @@ Resend 接入完成后通过 `RESEND_API_KEY` 配置密钥；当前版本不会�
 caddy validate --config deploy/Caddyfile
 caddy reload --config deploy/Caddyfile
 ```
+
+## systemd 部署
+
+`deploy/ib.service` 以 `ubuntu` 用户运行 release 二进制，监听 `127.0.0.1:8080`，适合配合上面的 Caddy 配置。
+
+```bash
+cargo build --release
+sudo install -d -m 0750 /etc/ib
+sudo install -o root -g ubuntu -m 0640 deploy/ib.env.example /etc/ib/ib.env
+sudoedit /etc/ib/ib.env
+
+sudo install -m 0644 deploy/ib.service /etc/systemd/system/ib.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ib.service
+sudo systemctl status ib.service
+```
+
+查看日志或重启：
+
+```bash
+journalctl -u ib.service -f
+sudo systemctl restart ib.service
+```

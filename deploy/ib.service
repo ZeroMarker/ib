@@ -1,0 +1,26 @@
+[Unit]
+Description=ib simulation trading web service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/ib
+EnvironmentFile=/etc/ib/ib.env
+Environment=SERVER_ADDR=127.0.0.1:8080
+Environment=RUST_BACKTRACE=1
+Environment=LD_LIBRARY_PATH=/home/ubuntu/instantclient/instantclient_23_26
+ExecStart=/home/ubuntu/ib/target/release/ib serve 127.0.0.1:8080
+Restart=on-failure
+RestartSec=5
+UMask=027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
