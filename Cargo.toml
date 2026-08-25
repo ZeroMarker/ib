@@ -1,0 +1,12 @@
+[package]
+name = "ib"
+version = "0.1.0"
+edition = "2021"
+description = "IBKR-style account/order/position database model on Oracle Autonomous Database"
+
+[dependencies]
+oracle = "0.6"
+chrono = "0.4"
+
+[profile.release]
+strip = true
