@@ -1,3 +1,4 @@
+use crate::web;
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -61,7 +62,11 @@ pub async fn serve(conn: Connection, address: &str) {
         db: Arc::new(Mutex::new(conn)),
     };
     let app = Router::new()
-        .route("/", get(index))
+        .route("/", get(web::index))
+        .route("/login", get(web::index))
+        .route("/register", get(web::index))
+        .route("/styles.css", get(web::styles))
+        .route("/app.js", get(web::app_js))
         .route("/api/health", get(health))
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -73,13 +78,6 @@ pub async fn serve(conn: Connection, address: &str) {
     axum::serve(listener, app)
         .await
         .unwrap_or_else(|e| panic!("HTTP server failed: {e}"));
-}
-
-async fn index() -> Response {
-    Json(MessageResponse {
-        message: "simulation trading platform",
-    })
-    .into_response()
 }
 
 async fn health() -> Response {

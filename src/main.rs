@@ -1,6 +1,7 @@
 mod auth;
 mod db;
 mod models;
+mod web;
 
 use models::*;
 use oracle::{Connection, InitParams};
@@ -15,7 +16,7 @@ fn usage() -> ! {
 
 commands:
   ping                                test Oracle connection
-  serve [ADDR]                        run HTTP auth API (default 127.0.0.1:8080)
+  serve [ADDR]                        run web frontend and auth API (default 127.0.0.1:8080)
   init-db                             create simulation trading schema
   init-auth                           add user and session tables to an existing database
   drop-db                             drop all schema tables

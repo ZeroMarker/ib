@@ -103,6 +103,10 @@ ib serve
 
 密码使用 Argon2 哈希，会话只在数据库保存令牌哈希。邮箱验证发送预留了 Resend TODO；在邮件适配器完成前，新用户可以直接登录，但 `email_verified` 为 `false`。
 
+Resend 接入完成后通过 `RESEND_API_KEY` 配置密钥；当前版本不会读取或发送邮件。
+
+前端页面由同一个 Rust 服务提供，包含登录、注册、登录态恢复、用户信息和退出登录视图。直接访问 `/`，或通过 Caddy 访问 `/public/ibkr/` 即可打开页面，不需要额外的 Node.js 构建步骤。
+
 ## Caddy 部署
 
 `deploy/Caddyfile` 将 `https://20070809.xyz/public/ibkr/` 反向代理到本机的 `127.0.0.1:8080`，并移除外部路径前缀。启动服务后将该配置加入 Caddy：
