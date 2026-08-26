@@ -87,15 +87,36 @@ pub async fn serve(pool: Pool, address: &str) {
         .unwrap_or_else(|e| panic!("HTTP server failed: {e}"));
 }
 
-async fn health(State(state): State<AppState>) -> Response {
-    match state
-        .db
-        .get()
-        .and_then(|conn| conn.query_row_as::<i64>("SELECT 1 FROM dual", &[]))
-    {
-        Ok(1) => Json(MessageResponse { message: "ok" }).into_response(),
-        Ok(_) | Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+async fn run_db<F>(state: AppState, task: F) -> Response
+where
+    F: FnOnce(&Pool) -> Response + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || task(&state.db)).await {
+        Ok(response) => response,
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
     }
+}
+
+/// Precomputed Argon2 hash used to equalize login timing for unknown emails,
+/// so response latency does not reveal whether an account exists.
+fn dummy_password_hash() -> &'static String {
+    static DUMMY_HASH: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+        hash_password("ib-timing-equalizer").expect("dummy hash generation failed")
+    });
+    &DUMMY_HASH
+}
+
+async fn health(State(state): State<AppState>) -> Response {
+    run_db(state, |pool| {
+        match pool
+            .get()
+            .and_then(|conn| conn.query_row_as::<i64>("SELECT 1 FROM dual", &[]))
+        {
+            Ok(1) => Json(MessageResponse { message: "ok" }).into_response(),
+            Ok(_) | Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+        }
+    })
+    .await
 }
 
 async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest>) -> Response {
@@ -107,66 +128,65 @@ async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    let password_hash = match hash_password(&request.password) {
-        Ok(hash) => hash,
-        Err(_) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create account",
-            )
-        }
-    };
-    let user_id = Uuid::new_v4().to_string();
-    let conn = match state.db.get() {
-        Ok(conn) => conn,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-    };
+    run_db(state, move |pool| {
+        // Argon2 hashing costs tens of milliseconds; keep it off Tokio workers.
+        let password_hash = match hash_password(&request.password) {
+            Ok(hash) => hash,
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not create account",
+                )
+            }
+        };
+        let user_id = Uuid::new_v4().to_string();
+        let conn = match pool.get() {
+            Ok(conn) => conn,
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        };
 
-    let existing: i64 = match conn.query_row_as(
-        "SELECT COUNT(*) FROM USERS WHERE EMAIL = :1",
-        &[&email.as_str()],
-    ) {
-        Ok(count) => count,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-    };
-    if existing > 0 {
-        return error(StatusCode::CONFLICT, "email is already registered");
-    }
-
-    if conn
-        .execute(
+        // A single INSERT lets the unique EMAIL index settle concurrent
+        // registrations; no check-then-insert race window remains.
+        if let Err(insert_error) = conn.execute(
             "INSERT INTO USERS (USER_ID, EMAIL, PASSWORD_HASH) VALUES (:1, :2, :3)",
             &[&user_id.as_str(), &email.as_str(), &password_hash.as_str()],
-        )
-        .is_err()
-    {
-        let _ = conn.rollback();
-        return error(StatusCode::CONFLICT, "email is already registered");
-    }
-
-    // TODO(resend): create a verification token and send it with Resend using RESEND_API_KEY.
-    // Registration remains usable until this adapter is implemented.
-    let token = match insert_session(&conn, &user_id) {
-        Ok(token) => token,
-        Err(_) => {
+        ) {
             let _ = conn.rollback();
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create session",
-            );
+            let is_duplicate = insert_error
+                .db_error()
+                .is_some_and(|db_error| db_error.code() == 1);
+            return if is_duplicate {
+                error(StatusCode::CONFLICT, "email is already registered")
+            } else {
+                error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
+            };
         }
-    };
-    if conn.commit().is_err() {
-        let _ = conn.rollback();
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
-    }
 
-    let response = UserResponse {
-        user_id,
-        email,
-        email_verified: false,
-    };
-    with_session_cookie(StatusCode::CREATED, token, Json(response))
+        // TODO(resend): create a verification token and send it with Resend using RESEND_API_KEY.
+        // Registration remains usable until this adapter is implemented.
+        let token = match insert_session(&conn, &user_id) {
+            Ok(token) => token,
+            Err(_) => {
+                let _ = conn.rollback();
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not create session",
+                );
+            }
+        };
+        if conn.commit().is_err() {
+            let _ = conn.rollback();
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
+        }
+
+        let response = UserResponse {
+            user_id,
+            email,
+            email_verified: false,
+        };
+        with_session_cookie(StatusCode::CREATED, token, Json(response))
+    })
+    .await
 }
 
 async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) -> Response {
@@ -174,73 +194,89 @@ async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) 
         Ok(email) => email,
         Err(message) => return error(StatusCode::BAD_REQUEST, message),
     };
-    let conn = match state.db.get() {
-        Ok(conn) => conn,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-    };
-    let (user_id, password_hash, verified): (String, String, i64) = match conn.query_row_as(
-        "SELECT USER_ID, PASSWORD_HASH, EMAIL_VERIFIED FROM USERS \
-         WHERE EMAIL = :1 AND STATUS = 'ACTIVE'",
-        &[&email.as_str()],
-    ) {
-        Ok(row) => row,
-        Err(_) => return error(StatusCode::UNAUTHORIZED, "invalid email or password"),
-    };
-    if !verify_password(&request.password, &password_hash) {
-        return error(StatusCode::UNAUTHORIZED, "invalid email or password");
-    }
 
-    let token = match insert_session(&conn, &user_id) {
-        Ok(token) => token,
-        Err(_) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create session",
-            )
+    run_db(state, move |pool| {
+        let conn = match pool.get() {
+            Ok(conn) => conn,
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        };
+        let (user_id, password_hash, verified): (String, String, i64) = match conn.query_row_as(
+            "SELECT USER_ID, PASSWORD_HASH, EMAIL_VERIFIED FROM USERS \
+             WHERE EMAIL = :1 AND STATUS = 'ACTIVE'",
+            &[&email.as_str()],
+        ) {
+            Ok(row) => row,
+            // Burn an Argon2 verification so unknown-email responses take the
+            // same time as wrong-password ones.
+            Err(_) => {
+                verify_password(&request.password, dummy_password_hash());
+                return error(StatusCode::UNAUTHORIZED, "invalid email or password");
+            }
+        };
+        if !verify_password(&request.password, &password_hash) {
+            return error(StatusCode::UNAUTHORIZED, "invalid email or password");
         }
-    };
-    if conn.commit().is_err() {
-        let _ = conn.rollback();
-        return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
-    }
 
-    let response = UserResponse {
-        user_id,
-        email,
-        email_verified: verified == 1,
-    };
-    with_session_cookie(StatusCode::OK, token, Json(response))
+        let token = match insert_session(&conn, &user_id) {
+            Ok(token) => token,
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not create session",
+                )
+            }
+        };
+        if conn.commit().is_err() {
+            let _ = conn.rollback();
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
+        }
+
+        let response = UserResponse {
+            user_id,
+            email,
+            email_verified: verified == 1,
+        };
+        with_session_cookie(StatusCode::OK, token, Json(response))
+    })
+    .await
 }
 
 async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Some(token) = session_token(&headers) {
-        if let Ok(conn) = state.db.get() {
-            let token_hash = hash_token(&token);
-            let _ = conn.execute(
-                "DELETE FROM SESSIONS WHERE TOKEN_HASH = :1",
-                &[&token_hash.as_str()],
-            );
-            let _ = conn.commit();
+    run_db(state, move |pool| {
+        if let Some(token) = session_token(&headers) {
+            if let Ok(conn) = pool.get() {
+                let token_hash = hash_token(&token);
+                let _ = conn.execute(
+                    "DELETE FROM SESSIONS WHERE TOKEN_HASH = :1",
+                    &[&token_hash.as_str()],
+                );
+                let _ = conn.commit();
+            }
         }
-    }
-    let cookie = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0");
-    (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+        let cookie =
+            format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0");
+        (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+    })
+    .await
 }
 
 async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let conn = match state.db.get() {
-        Ok(conn) => conn,
-        Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-    };
-    match current_user(&conn, &headers) {
-        Ok(user) => Json(UserResponse {
-            user_id: user.user_id,
-            email: user.email,
-            email_verified: user.email_verified,
-        })
-        .into_response(),
-        Err(status) => error(status, "authentication required"),
-    }
+    run_db(state, move |pool| {
+        let conn = match pool.get() {
+            Ok(conn) => conn,
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        };
+        match current_user(&conn, &headers) {
+            Ok(user) => Json(UserResponse {
+                user_id: user.user_id,
+                email: user.email,
+                email_verified: user.email_verified,
+            })
+            .into_response(),
+            Err(status) => error(status, "authentication required"),
+        }
+    })
+    .await
 }
 
 pub(crate) fn current_user(

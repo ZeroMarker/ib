@@ -1,4 +1,4 @@
-import { StrictMode, type FormEvent, useEffect, useMemo, useState } from 'react'
+import { StrictMode, type FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 import FillsPage from './pages/FillsPage'
@@ -9,10 +9,15 @@ import TradePage, { type CashForm, type ContractForm, type OrderForm } from './p
 import type { AuthUser, InstallPrompt, Order, Overview, View } from './types'
 import { viewFromHash, viewMeta } from './types'
 
+class ApiError extends Error {
+  status: number
+  constructor(status: number, message: string) { super(message); this.status = status }
+}
+
 const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(`api/${path}`, { credentials: 'same-origin', ...init })
   const data = await response.json().catch(() => undefined)
-  if (!response.ok) throw new Error(data?.error ?? '请求失败，请稍后重试。')
+  if (!response.ok) throw new ApiError(response.status, data?.error ?? '请求失败，请稍后重试。')
   return data as T
 }
 
@@ -102,9 +107,20 @@ function Dashboard({ user, onLogout, installPrompt, onInstalled }: { user: AuthU
     if (!window.location.hash) window.history.replaceState(null, '', '#overview')
     return () => window.removeEventListener('hashchange', syncView)
   }, [])
+  // Ignore responses from superseded loads: concurrent refreshes must not let
+  // a stale overview overwrite a newer one.
+  const loadSeq = useRef(0)
   const load = async () => {
-    try { setOverview(await api<Overview>('trading/overview')); setError(''); setLastUpdated(new Date()) }
-    catch (reason) { setError(reason instanceof Error ? reason.message : '无法读取交易数据') }
+    const sequence = ++loadSeq.current
+    try {
+      const data = await api<Overview>('trading/overview')
+      if (sequence !== loadSeq.current) return
+      setOverview(data); setError(''); setLastUpdated(new Date())
+    } catch (reason) {
+      if (sequence !== loadSeq.current) return
+      if (reason instanceof ApiError && reason.status === 401) return onLogout()
+      setError(reason instanceof Error ? reason.message : '无法读取交易数据')
+    }
   }
   useEffect(() => { load() }, [])
   useEffect(() => {
@@ -123,7 +139,7 @@ function Dashboard({ user, onLogout, installPrompt, onInstalled }: { user: AuthU
   const openOrders = overview?.orders.filter((order) => ['Submitted', 'PreSubmitted'].includes(order.status)).length ?? 0
   const filledOrders = overview?.orders.filter((order) => order.status.toUpperCase() === 'FILLED').length ?? 0
   const filledQuantity = overview?.orders.reduce((total, order) => total + Number(order.filled_quantity), 0) ?? 0
-  const cashTotal = overview?.cash.reduce((total, item) => total + Number(item.cash), 0) ?? 0
+  const cashTotal = overview ? Number(overview.cash.find((item) => item.currency === overview.account.currency)?.cash ?? 0) : 0
   const positionCost = overview?.positions.reduce((total, item) => total + Math.abs(Number(item.position)) * Number(item.avg_cost ?? 0), 0) ?? 0
   const latestFill = overview?.fills[0]
   const contractActivity = (overview?.contracts ?? []).map((contract) => ({
@@ -135,7 +151,10 @@ function Dashboard({ user, onLogout, installPrompt, onInstalled }: { user: AuthU
     if (busyAction) return
     setBusyAction(actionName)
     try { await work(); setNotice(success); setError(''); await load() }
-    catch (reason) { setError(reason instanceof Error ? reason.message : '操作失败') }
+    catch (reason) {
+      if (reason instanceof ApiError && reason.status === 401) return onLogout()
+      setError(reason instanceof Error ? reason.message : '操作失败')
+    }
     finally { setBusyAction('') }
   }
   const addContract = (event: FormEvent) => {
@@ -163,10 +182,10 @@ function Dashboard({ user, onLogout, installPrompt, onInstalled }: { user: AuthU
       }))
     }, '订单已提交。', 'order')
   }
-  const setCash = (event: FormEvent) => { event.preventDefault(); const amount = Number(cashForm.amount); if (!/^[a-zA-Z]{3}$/.test(cashForm.currency) || !Number.isFinite(amount)) return setError('请填写有效的币种和金额。'); return action(async () => { await api('trading/cash', json({ ...cashForm, currency: cashForm.currency.toUpperCase() })) }, '现金余额已更新。', 'cash') }
+  const install = async () => { if (!installPrompt) return; try { await installPrompt.prompt(); await installPrompt.userChoice } catch { /* 用户关闭或浏览器拒绝安装提示 */ } finally { onInstalled() } }
   const cancel = (orderId: number) => action(async () => { await api(`trading/orders/${orderId}/cancel`, { method: 'POST' }) }, '订单已撤销。', `cancel-${orderId}`)
   const submitFill = (event: FormEvent) => { event.preventDefault(); const price = Number(fillPrice); if (fillTarget === null || !Number.isFinite(price) || price <= 0) return setError('请输入有效的成交价格。'); return action(async () => { await api(`trading/orders/${fillTarget}/fill`, json({ price: fillPrice })); setFillTarget(null); setFillPrice('') }, '模拟成交已记账。', `fill-${fillTarget}`) }
-  const install = async () => { if (!installPrompt) return; await installPrompt.prompt(); await installPrompt.userChoice; onInstalled() }
+  const setCash = (event: FormEvent) => { event.preventDefault(); const amount = Number(cashForm.amount); if (!/^[a-zA-Z]{3}$/.test(cashForm.currency) || !Number.isFinite(amount) || amount <= 0) return setError('请填写有效的币种和正数金额。'); return action(async () => { await api('trading/cash', json({ ...cashForm, currency: cashForm.currency.toUpperCase() })) }, '现金余额已更新。', 'cash') }
   const logout = async () => { await api('auth/logout', { method: 'POST' }).catch(() => {}); onLogout() }
   const currentView = viewMeta[activeView]
 

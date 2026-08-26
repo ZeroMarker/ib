@@ -147,12 +147,28 @@ fn boxed_error(status: StatusCode, message: impl Into<String>) -> Box<Response> 
     Box::new(error(status, message))
 }
 
-fn account_connection(
-    state: &AppState,
+/// Run blocking Oracle work on the dedicated blocking thread pool so slow
+/// queries never occupy a Tokio worker thread.
+async fn run_db<F>(state: AppState, task: F) -> Response
+where
+    F: FnOnce(&oracle::pool::Pool) -> Response + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || task(&state.db)).await {
+        Ok(response) => response,
+        Err(_) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal server error",
+        ),
+    }
+}
+
+/// Acquire a pooled connection, authenticate the caller and ensure their
+/// simulation account exists. Call from inside `run_db` closures only.
+fn open_account_connection(
+    pool: &oracle::pool::Pool,
     headers: &HeaderMap,
 ) -> Result<(oracle::Connection, String), Box<Response>> {
-    let conn = state
-        .db
+    let conn = pool
         .get()
         .map_err(|_| boxed_error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
     let user = auth::current_user(&conn, headers)
@@ -245,60 +261,63 @@ fn fill_response(fill: Fill) -> FillResponse {
 }
 
 async fn overview(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let account = match db::list_accounts(&conn)
-        .into_iter()
-        .find(|account| account.account_id == account_id)
-    {
-        Some(account) => account_response(account),
-        None => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "simulation account missing",
-            )
-        }
-    };
-    Json(OverviewResponse {
-        account,
-        contracts: db::list_contracts(&conn)
-            .into_iter()
-            .map(contract_response)
-            .collect(),
-        orders: db::list_account_orders(&conn, &account_id, None)
-            .into_iter()
-            .map(order_response)
-            .collect(),
-        positions: db::list_positions(&conn, Some(&account_id))
-            .into_iter()
-            .map(position_response)
-            .collect(),
-        cash: db::list_cash(&conn, Some(&account_id))
-            .into_iter()
-            .map(cash_response)
-            .collect(),
-        fills: db::list_fills(&conn, &account_id)
-            .into_iter()
-            .map(fill_response)
-            .collect(),
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        let account = match db::get_account(&conn, &account_id) {
+            Some(account) => account_response(account),
+            None => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "simulation account missing",
+                )
+            }
+        };
+        Json(OverviewResponse {
+            account,
+            contracts: db::list_contracts(&conn)
+                .into_iter()
+                .map(contract_response)
+                .collect(),
+            orders: db::list_account_orders(&conn, &account_id, None)
+                .into_iter()
+                .map(order_response)
+                .collect(),
+            positions: db::list_positions(&conn, Some(&account_id))
+                .into_iter()
+                .map(position_response)
+                .collect(),
+            cash: db::list_cash(&conn, Some(&account_id))
+                .into_iter()
+                .map(cash_response)
+                .collect(),
+            fills: db::list_fills(&conn, &account_id)
+                .into_iter()
+                .map(fill_response)
+                .collect(),
+        })
+        .into_response()
     })
-    .into_response()
+    .await
 }
 
 async fn contracts(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (conn, _) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    Json(
-        db::list_contracts(&conn)
-            .into_iter()
-            .map(contract_response)
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    run_db(state, move |pool| {
+        let (conn, _) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        Json(
+            db::list_contracts(&conn)
+                .into_iter()
+                .map(contract_response)
+                .collect::<Vec<_>>(),
+        )
+        .into_response()
+    })
+    .await
 }
 
 async fn create_contract(
@@ -306,42 +325,48 @@ async fn create_contract(
     headers: HeaderMap,
     Json(request): Json<ContractRequest>,
 ) -> Response {
-    let (conn, _) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let symbol = request.symbol.trim().to_uppercase();
-    let sec_type = request.sec_type.trim().to_uppercase();
-    let exchange = request.exchange.trim().to_uppercase();
-    let currency = request.currency.trim().to_uppercase();
-    if request.conid <= 0 || symbol.is_empty() || currency.len() != 3 {
-        return error(StatusCode::BAD_REQUEST, "invalid contract");
-    }
-    let contract = Contract {
-        conid: request.conid,
-        symbol,
-        sec_type,
-        exchange,
-        currency,
-    };
-    match db::add_contract(&conn, &contract) {
-        Ok(()) => (StatusCode::CREATED, Json(contract_response(contract))).into_response(),
-        Err(message) => error(StatusCode::CONFLICT, message),
-    }
+    run_db(state, move |pool| {
+        let (conn, _) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        let symbol = request.symbol.trim().to_uppercase();
+        let sec_type = request.sec_type.trim().to_uppercase();
+        let exchange = request.exchange.trim().to_uppercase();
+        let currency = request.currency.trim().to_uppercase();
+        if request.conid <= 0 || symbol.is_empty() || currency.len() != 3 {
+            return error(StatusCode::BAD_REQUEST, "invalid contract");
+        }
+        let contract = Contract {
+            conid: request.conid,
+            symbol,
+            sec_type,
+            exchange,
+            currency,
+        };
+        match db::add_contract(&conn, &contract) {
+            Ok(()) => (StatusCode::CREATED, Json(contract_response(contract))).into_response(),
+            Err(message) => error(StatusCode::CONFLICT, message),
+        }
+    })
+    .await
 }
 
 async fn orders(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    Json(
-        db::list_account_orders(&conn, &account_id, None)
-            .into_iter()
-            .map(order_response)
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        Json(
+            db::list_account_orders(&conn, &account_id, None)
+                .into_iter()
+                .map(order_response)
+                .collect::<Vec<_>>(),
+        )
+        .into_response()
+    })
+    .await
 }
 
 async fn place_order(
@@ -349,70 +374,78 @@ async fn place_order(
     headers: HeaderMap,
     Json(request): Json<OrderRequest>,
 ) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let quantity = match parse_decimal(&request.quantity, "quantity") {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let lmt_price = match request.lmt_price.as_deref() {
-        Some(value) => match parse_decimal(value, "limit price") {
-            Ok(value) => Some(value),
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
             Err(response) => return *response,
-        },
-        None => None,
-    };
-    let aux_price = match request.aux_price.as_deref() {
-        Some(value) => match parse_decimal(value, "stop price") {
-            Ok(value) => Some(value),
+        };
+        let quantity = match parse_decimal(&request.quantity, "quantity") {
+            Ok(value) => value,
             Err(response) => return *response,
-        },
-        None => None,
-    };
-    if !db::list_contracts(&conn)
-        .iter()
-        .any(|contract| contract.conid == request.conid)
-    {
-        return error(StatusCode::BAD_REQUEST, "contract not found");
-    }
-    let order_id = match db::next_order_id(&conn, &account_id) {
-        Ok(value) => value,
-        Err(_) => {
-            return error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not allocate order ID",
-            )
+        };
+        let lmt_price = match request.lmt_price.as_deref() {
+            Some(value) => match parse_decimal(value, "limit price") {
+                Ok(value) => Some(value),
+                Err(response) => return *response,
+            },
+            None => None,
+        };
+        let aux_price = match request.aux_price.as_deref() {
+            Some(value) => match parse_decimal(value, "stop price") {
+                Ok(value) => Some(value),
+                Err(response) => return *response,
+            },
+            None => None,
+        };
+        if !db::contract_exists(&conn, request.conid) {
+            return error(StatusCode::BAD_REQUEST, "contract not found");
         }
-    };
-    let order = NewOrder {
-        order_id,
-        account_id: account_id.clone(),
-        conid: request.conid,
-        side: request.side.to_uppercase(),
-        order_type: request.order_type.to_uppercase(),
-        quantity,
-        lmt_price,
-        aux_price,
-    };
-    if let Err(message) = db::place_order(&conn, &order) {
-        return error(StatusCode::BAD_REQUEST, message);
-    }
-    Json(order_response(Order {
-        order_id,
-        perm_id: None,
-        account_id,
-        conid: order.conid,
-        side: order.side,
-        order_type: order.order_type,
-        total_quantity: order.quantity,
-        filled_quantity: Decimal::ZERO,
-        lmt_price: order.lmt_price,
-        aux_price: order.aux_price,
-        status: "Submitted".into(),
-    }))
-    .into_response()
+        // Validate before allocating the order ID so invalid requests never
+        // take the per-account row lock that serializes ID assignment.
+        let side = request.side.to_uppercase();
+        let order_type = request.order_type.to_uppercase();
+        let candidate = NewOrder {
+            order_id: 0,
+            account_id: account_id.clone(),
+            conid: request.conid,
+            side,
+            order_type,
+            quantity,
+            lmt_price,
+            aux_price,
+        };
+        if let Err(message) = db::validate_order(&candidate) {
+            return error(StatusCode::BAD_REQUEST, message);
+        }
+        let order_id = match db::next_order_id(&conn, &account_id) {
+            Ok(value) => value,
+            Err(_) => {
+                return error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "could not allocate order ID",
+                )
+            }
+        };
+        let order = NewOrder { order_id, ..candidate };
+        if let Err(message) = db::place_order(&conn, &order) {
+            return error(StatusCode::BAD_REQUEST, message);
+        }
+        Json(order_response(Order {
+            order_id,
+            perm_id: None,
+            account_id,
+            conid: order.conid,
+            side: order.side,
+            order_type: order.order_type,
+            total_quantity: order.quantity,
+            filled_quantity: Decimal::ZERO,
+            lmt_price: order.lmt_price,
+            aux_price: order.aux_price,
+            status: "Submitted".into(),
+        }))
+        .into_response()
+    })
+    .await
 }
 
 async fn cancel_order(
@@ -420,22 +453,18 @@ async fn cancel_order(
     headers: HeaderMap,
     Path(order_id): Path<i64>,
 ) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    if !db::list_account_orders(&conn, &account_id, None)
-        .iter()
-        .any(|order| {
-            order.order_id == order_id && !["Filled", "Cancelled"].contains(&order.status.as_str())
-        })
-    {
-        return error(StatusCode::CONFLICT, "order is not cancellable");
-    }
-    match db::cancel_order(&conn, order_id, &account_id) {
-        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-        Err(message) => error(StatusCode::CONFLICT, message),
-    }
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        // cancel_order reports non-cancellable orders itself; no scan needed.
+        match db::cancel_order(&conn, order_id, &account_id) {
+            Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+            Err(message) => error(StatusCode::CONFLICT, message),
+        }
+    })
+    .await
 }
 
 async fn fill_order(
@@ -444,56 +473,65 @@ async fn fill_order(
     Path(order_id): Path<i64>,
     Json(request): Json<FillRequest>,
 ) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let price = match parse_decimal(&request.price, "fill price") {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let exec_id = request.exec_id.unwrap_or_else(|| {
-        let compact = Uuid::new_v4().simple().to_string();
-        format!("WEB{}", &compact[..21])
-    });
-    let fill = NewFill {
-        exec_id,
-        order_id,
-        account_id,
-        price,
-    };
-    match db::record_fill(&conn, &fill) {
-        Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
-        Err(message) => error(StatusCode::CONFLICT, message),
-    }
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        let price = match parse_decimal(&request.price, "fill price") {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        let exec_id = request.exec_id.unwrap_or_else(|| {
+            let compact = Uuid::new_v4().simple().to_string();
+            format!("WEB{}", &compact[..21])
+        });
+        let fill = NewFill {
+            exec_id,
+            order_id,
+            account_id,
+            price,
+        };
+        match db::record_fill(&conn, &fill) {
+            Ok(()) => (StatusCode::NO_CONTENT, ()).into_response(),
+            Err(message) => error(StatusCode::CONFLICT, message),
+        }
+    })
+    .await
 }
 
 async fn positions(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    Json(
-        db::list_positions(&conn, Some(&account_id))
-            .into_iter()
-            .map(position_response)
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        Json(
+            db::list_positions(&conn, Some(&account_id))
+                .into_iter()
+                .map(position_response)
+                .collect::<Vec<_>>(),
+        )
+        .into_response()
+    })
+    .await
 }
 
 async fn cash(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    Json(
-        db::list_cash(&conn, Some(&account_id))
-            .into_iter()
-            .map(cash_response)
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        Json(
+            db::list_cash(&conn, Some(&account_id))
+                .into_iter()
+                .map(cash_response)
+                .collect::<Vec<_>>(),
+        )
+        .into_response()
+    })
+    .await
 }
 
 async fn set_cash(
@@ -501,38 +539,44 @@ async fn set_cash(
     headers: HeaderMap,
     Json(request): Json<CashRequest>,
 ) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let amount = match parse_decimal(&request.amount, "cash amount") {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    let currency = request.currency.trim().to_uppercase();
-    if currency.len() != 3
-        || !currency
-            .chars()
-            .all(|character| character.is_ascii_alphabetic())
-    {
-        return error(StatusCode::BAD_REQUEST, "currency must be a 3-letter code");
-    }
-    match db::set_cash(&conn, &account_id, &currency, amount) {
-        Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(message) => error(StatusCode::BAD_REQUEST, message),
-    }
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        let amount = match parse_decimal(&request.amount, "cash amount") {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        let currency = request.currency.trim().to_uppercase();
+        if currency.len() != 3
+            || !currency
+                .chars()
+                .all(|character| character.is_ascii_alphabetic())
+        {
+            return error(StatusCode::BAD_REQUEST, "currency must be a 3-letter code");
+        }
+        match db::set_cash(&conn, &account_id, &currency, amount) {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(message) => error(StatusCode::BAD_REQUEST, message),
+        }
+    })
+    .await
 }
 
 async fn fills(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    let (conn, account_id) = match account_connection(&state, &headers) {
-        Ok(value) => value,
-        Err(response) => return *response,
-    };
-    Json(
-        db::list_fills(&conn, &account_id)
-            .into_iter()
-            .map(fill_response)
-            .collect::<Vec<_>>(),
-    )
-    .into_response()
+    run_db(state, move |pool| {
+        let (conn, account_id) = match open_account_connection(pool, &headers) {
+            Ok(value) => value,
+            Err(response) => return *response,
+        };
+        Json(
+            db::list_fills(&conn, &account_id)
+                .into_iter()
+                .map(fill_response)
+                .collect::<Vec<_>>(),
+        )
+        .into_response()
+    })
+    .await
 }

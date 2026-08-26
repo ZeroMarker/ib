@@ -137,10 +137,13 @@ pub fn ensure_user_account(conn: &Connection, user_id: &str) -> Result<String, o
         &[&account_id.as_str()],
     )?;
     if existing == 0 {
-        conn.execute(
+        if let Err(error) = conn.execute(
             "INSERT INTO ACCOUNTS (ACCOUNT_ID, ACCOUNT_TYPE) VALUES (:1, 'MARGIN')",
             &[&account_id.as_str()],
-        )?;
+        ) {
+            let _ = conn.rollback();
+            return Err(error);
+        }
         conn.commit()?;
     }
     Ok(account_id)
@@ -165,6 +168,27 @@ pub fn list_accounts(conn: &Connection) -> Vec<Account> {
     out
 }
 
+/// Fetch a single account by ID instead of scanning the whole table.
+pub fn get_account(conn: &Connection, account_id: &str) -> Option<Account> {
+    let mut stmt = conn
+        .statement(
+            "SELECT ACCOUNT_ID, ACCOUNT_TYPE, CURRENCY, STATUS FROM ACCOUNTS \
+             WHERE ACCOUNT_ID = :1",
+        )
+        .build()
+        .unwrap();
+    let mut out = Vec::new();
+    rows(&mut stmt, &[&account_id], |r| {
+        out.push(Account {
+            account_id: r.get(0).unwrap(),
+            account_type: r.get(1).unwrap(),
+            currency: r.get(2).unwrap(),
+            status: r.get(3).unwrap(),
+        });
+    });
+    out.pop()
+}
+
 pub fn add_contract(conn: &Connection, c: &Contract) -> Result<(), String> {
     let sec_type = c.sec_type.to_uppercase();
     let exchange = c.exchange.to_uppercase();
@@ -180,9 +204,25 @@ pub fn add_contract(conn: &Connection, c: &Contract) -> Result<(), String> {
             &currency.as_str(),
         ],
     )
-    .map_err(|error| error.to_string())?;
-    conn.commit().map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        let _ = conn.rollback();
+        error.to_string()
+    })?;
+    conn.commit().map_err(|error| {
+        let _ = conn.rollback();
+        error.to_string()
+    })?;
     Ok(())
+}
+
+/// Check contract existence with a targeted lookup instead of loading all rows.
+pub fn contract_exists(conn: &Connection, conid: i64) -> bool {
+    conn.query_row_as::<i64>(
+        "SELECT COUNT(*) FROM CONTRACTS WHERE CONID = :1",
+        &[&conid],
+    )
+    .map(|count| count > 0)
+    .unwrap_or(false)
 }
 
 pub fn list_contracts(conn: &Connection) -> Vec<Contract> {
@@ -205,7 +245,7 @@ pub fn list_contracts(conn: &Connection) -> Vec<Contract> {
     out
 }
 
-pub fn place_order(conn: &Connection, o: &NewOrder) -> Result<(), String> {
+pub fn validate_order(o: &NewOrder) -> Result<(), String> {
     if !["MKT", "LMT", "STP", "STP_LMT"].contains(&o.order_type.as_str()) {
         return Err(format!("unsupported order type: {}", o.order_type));
     }
@@ -227,8 +267,13 @@ pub fn place_order(conn: &Connection, o: &NewOrder) -> Result<(), String> {
     if o.aux_price.is_some_and(|price| price <= Decimal::ZERO) {
         return Err("aux price must be positive".into());
     }
+    Ok(())
+}
 
+pub fn place_order(conn: &Connection, o: &NewOrder) -> Result<(), String> {
+    validate_order(o)?;
     let quantity = scaled(&o.quantity).map_err(|error| error.to_string())?;
+
     let lmt_price = o
         .lmt_price
         .as_ref()
@@ -258,8 +303,16 @@ pub fn place_order(conn: &Connection, o: &NewOrder) -> Result<(), String> {
             &quantity,
         ],
     )
-    .map_err(|error| error.to_string())?;
-    conn.commit().map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        // Release the ACCOUNTS row lock taken by next_order_id before the
+        // pooled connection goes back to the pool with an open transaction.
+        let _ = conn.rollback();
+        error.to_string()
+    })?;
+    conn.commit().map_err(|error| {
+        let _ = conn.rollback();
+        error.to_string()
+    })?;
     Ok(())
 }
 
@@ -370,16 +423,20 @@ pub fn list_orders(conn: &Connection, status: Option<&str>) -> Vec<Order> {
 }
 
 pub fn cancel_order(conn: &Connection, order_id: i64, account_id: &str) -> Result<(), String> {
-    let n = conn
+    let n = match conn
         .execute(
             "UPDATE ORDERS SET STATUS = 'Cancelled', UPDATED_AT = SYSTIMESTAMP \
              WHERE ORDER_ID = :1 AND ACCOUNT_ID = :2 \
                AND STATUS NOT IN ('Filled','Cancelled')",
             &[&order_id, &account_id],
         )
-        .map_err(|error| error.to_string())?
-        .row_count()
-        .unwrap_or(0);
+    {
+        Ok(count) => count.row_count().unwrap_or(0),
+        Err(error) => {
+            let _ = conn.rollback();
+            return Err(error.to_string());
+        }
+    };
     if n == 0 {
         return Err(format!(
             "order {order_id} not cancellable in account {account_id}"
@@ -574,8 +631,14 @@ pub fn set_cash(
          WHEN NOT MATCHED THEN INSERT (ACCOUNT_ID, CURRENCY, CASH) VALUES (S.A, S.CUR, S.AMT)",
         &[&account_id, &currency.as_str(), &amount],
     )
-    .map_err(|error| error.to_string())?;
-    conn.commit().map_err(|error| error.to_string())?;
+    .map_err(|error| {
+        let _ = conn.rollback();
+        error.to_string()
+    })?;
+    conn.commit().map_err(|error| {
+        let _ = conn.rollback();
+        error.to_string()
+    })?;
     Ok(())
 }
 
