@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { api, json, ApiError } from '../api'
 import type { Overview, View } from '../types'
-import { viewFromHash } from '../types'
+import { viewFromHash, viewMeta } from '../types'
 
 export function useTrading(onLogout: () => void) {
   const [activeView, setActiveView] = useState<View>(viewFromHash)
@@ -48,6 +48,29 @@ export function useTrading(onLogout: () => void) {
       setOrderForm((form) => ({ ...form, conid: String(overview.contracts[0].conid) }))
     }
   }, [overview])
+  // Keep the browser tab title in sync with the active workspace view.
+  useEffect(() => {
+    document.title = `${viewMeta[activeView].title} · ib paper`
+  }, [activeView])
+  // Terminal shortcuts: 1-5 switch views, R refresh, Esc dismiss the fill modal.
+  // Re-subscribes each render so the handler never closes over stale state.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return
+      const views: View[] = ['overview', 'trade', 'orders', 'positions', 'fills']
+      const index = ['1', '2', '3', '4', '5'].indexOf(event.key)
+      if (index !== -1) {
+        if (views[index] !== activeView) { event.preventDefault(); window.location.hash = `#${views[index]}` }
+        return
+      }
+      if (event.key === 'r' || event.key === 'R') { event.preventDefault(); action(load, '数据已刷新。', 'refresh'); return }
+      if (event.key === 'Escape') setFillTarget(null)
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  })
 
   const symbols = useMemo(() => new Map((overview?.contracts ?? []).map((item) => [item.conid, item.symbol])), [overview])
   const visibleContracts = overview?.contracts.filter((item) => `${item.symbol} ${item.conid} ${item.exchange}`.toLowerCase().includes(contractQuery.toLowerCase())) ?? []
