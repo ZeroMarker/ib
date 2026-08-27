@@ -6,6 +6,10 @@
 
 项目已经具备 Oracle 数据库连接、模拟交易账本、用户注册登录、终端式前端、Caddy 和 systemd 部署能力。当前前端已完成从基础表单到模拟交易终端的体验升级，后续重点转向行情、资产估值和风控能力。
 
+## 本轮执行（2026-08-27）
+
+- [x] 前端结构重构：拆分 `src/main.tsx` 单体为 `api.ts` 客户端、`App.tsx`（App/Auth）、`hooks/useTrading.ts`（工作台状态与操作）、`components/Layout.tsx`（侧边栏/顶栏/导航/成交弹窗）与 `pages/Dashboard.tsx`，消除 props 钻取与单体堆积。
+
 ## 本轮执行
 
 - [x] 确认数据库连接、wallet 和 systemd 服务正常。
