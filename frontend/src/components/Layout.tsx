@@ -1,5 +1,7 @@
-import type { FormEvent } from 'react'
+import { useEffect, useRef, type FormEvent } from 'react'
 import type { InstallPrompt, View } from '../types'
+
+type DataState = 'loading' | 'online' | 'stale'
 
 type LinkSpec = { view: View; href: string; icon: string; label: string }
 type NavCountSpec = { view: View; href: string; icon: string; label: string; count?: number }
@@ -22,33 +24,34 @@ const mobileLinks: LinkSpec[] = [
 
 export function Sidebar({ activeView, openOrders, installPrompt, busyAction, onRefresh, onInstall }: { activeView: View; openOrders: number; installPrompt: InstallPrompt | null; busyAction: string; onRefresh: () => void; onInstall: () => void }) {
   return (
-    <aside className="app-sidebar">
-      <div className="sidebar-brand"><div className="brand-mark small">ib</div><div><strong>ib paper</strong><span>SIMULATION OS</span></div></div>
+    <aside className="app-sidebar" aria-label="主导航">
+      <div className="sidebar-brand"><div className="brand-mark small" aria-hidden="true">ib</div><div><strong>ib paper</strong><span>SIMULATION OS</span></div></div>
       <div className="sidebar-section"><p>工作区</p>
         {sidebarLinks.map((item) => (
-          <a key={item.view} className={activeView === item.view ? 'sidebar-link active' : 'sidebar-link'} href={item.href}>
-            <span>{item.icon}</span>{item.label}{item.view === 'orders' && <b>{openOrders}</b>}
+          <a key={item.view} className={activeView === item.view ? 'sidebar-link active' : 'sidebar-link'} href={item.href} aria-current={activeView === item.view ? 'page' : undefined}>
+            <span aria-hidden="true">{item.icon}</span>{item.label}{item.view === 'orders' && <b>{openOrders}</b>}
           </a>
         ))}
       </div>
       <div className="sidebar-section"><p>工具</p>
-        <button className="sidebar-link sidebar-button" onClick={onRefresh} disabled={busyAction !== ''}><span>↻</span>同步数据</button>
-        <button className="sidebar-link sidebar-button" onClick={onInstall} disabled={!installPrompt}><span>⇩</span>安装 PWA</button>
+        <button type="button" className="sidebar-link sidebar-button" onClick={onRefresh} disabled={busyAction !== ''}><span aria-hidden="true">↻</span>同步数据</button>
+        <button type="button" className="sidebar-link sidebar-button" onClick={onInstall} disabled={!installPrompt}><span aria-hidden="true">⇩</span>安装 PWA</button>
       </div>
       <div className="sidebar-footer"><span className="status-dot" />模拟环境运行中<small>Oracle ledger · session safe · 1-5 切换视图</small></div>
     </aside>
   )
 }
 
-export function DashboardHeader({ email, currentView, installPrompt, onInstall, onLogout }: { email: string; currentView: { eyebrow: string; title: string }; installPrompt: InstallPrompt | null; onInstall: () => void; onLogout: () => void }) {
+export function DashboardHeader({ email, currentView, dataState, installPrompt, onInstall, onLogout }: { email: string; currentView: { eyebrow: string; title: string }; dataState: DataState; installPrompt: InstallPrompt | null; onInstall: () => void; onLogout: () => void }) {
+  const syncLabel = dataState === 'online' ? '数据已同步' : dataState === 'stale' ? '显示缓存数据' : '等待同步'
   return (
     <header className="dashboard-header">
       <div className="brand-line"><div className="mobile-brand-mark brand-mark small">ib</div><div><p className="eyebrow">{currentView.eyebrow}</p><h1>{currentView.title}</h1></div></div>
       <div className="header-actions">
-        {installPrompt && <button className="install-button" onClick={onInstall}>安装应用</button>}
-        <span className="sync-pill"><span className="status-dot" />数据已同步</span>
-        <span className="user-pill"><span className="status-dot" />{email}</span>
-        <button className="text-button" onClick={onLogout}>退出登录</button>
+        {installPrompt && <button type="button" className="install-button" onClick={onInstall}>安装应用</button>}
+        <span className={`sync-pill sync-${dataState}`}><span className="status-dot" />{syncLabel}</span>
+        <span className="user-pill"><span className="status-dot" aria-hidden="true" />{email}</span>
+        <button type="button" className="text-button" onClick={onLogout}>退出登录</button>
       </div>
     </header>
   )
@@ -58,7 +61,7 @@ export function MobileNav({ activeView }: { activeView: View }) {
   return (
     <nav className="mobile-nav" aria-label="移动端工作台导航">
       {mobileLinks.map((item) => (
-        <a key={item.view} className={activeView === item.view ? 'active' : ''} href={item.href}><span>{item.icon}</span>{item.label}</a>
+        <a key={item.view} className={activeView === item.view ? 'active' : ''} href={item.href} aria-current={activeView === item.view ? 'page' : undefined}><span aria-hidden="true">{item.icon}</span>{item.label}</a>
       ))}
     </nav>
   )
@@ -71,8 +74,8 @@ export function VerifyNote({ emailVerified }: { emailVerified: boolean }) {
 export function Alerts({ error, notice, busyAction, onRetry }: { error: string; notice: string; busyAction: string; onRetry: () => void }) {
   return (
     <>
-      {error && <div className="alert error"><span>{error}</span><button className="alert-action" disabled={busyAction !== ''} onClick={onRetry}>重试</button></div>}
-      {notice && <div className="alert success">{notice}</div>}
+      {error && <div className="alert error" role="alert"><span>{error}</span><button type="button" className="alert-action" disabled={busyAction !== ''} onClick={onRetry}>重试</button></div>}
+      {notice && <div className="alert success" role="status">{notice}</div>}
     </>
   )
 }
@@ -88,19 +91,39 @@ export function WorkspaceNav({ activeView, openOrders, positionsCount, fillsCoun
   return (
     <nav className="workspace-nav" aria-label="工作台导航">
       {items.map((item) => (
-        <a key={item.view} className={activeView === item.view ? 'active' : ''} href={item.href}>{item.label}{item.count !== undefined && <b>{item.count}</b>}</a>
+        <a key={item.view} className={activeView === item.view ? 'active' : ''} href={item.href} aria-current={activeView === item.view ? 'page' : undefined}>{item.label}{item.count !== undefined && <b>{item.count}</b>}</a>
       ))}
-      <span className="refresh-meta">{lastUpdated ? `更新于 ${lastUpdated.toLocaleTimeString()}` : '尚未同步'}<button className="text-button" disabled={busyAction !== ''} onClick={onRefresh}>刷新</button></span>
+      <span className="refresh-meta">{lastUpdated ? `更新于 ${lastUpdated.toLocaleTimeString()}` : '尚未同步'}<button type="button" className="text-button" disabled={busyAction !== ''} onClick={onRefresh}>刷新</button></span>
     </nav>
   )
 }
 
 export function FillModal({ fillTarget, fillPrice, setFillPrice, busyAction, onClose, onSubmit }: { fillTarget: number | null; fillPrice: string; setFillPrice: (value: string) => void; busyAction: string; onClose: () => void; onSubmit: (event: FormEvent) => void }) {
+  const closeRef = useRef<HTMLButtonElement>(null)
+  const modalRef = useRef<HTMLElement>(null)
+
+  useEffect(() => {
+    if (fillTarget === null) return
+    const previous = document.activeElement as HTMLElement | null
+    closeRef.current?.focus()
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Tab' || !modalRef.current) return
+      const focusable = modalRef.current.querySelectorAll<HTMLElement>('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus() }
+      if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus() }
+    }
+    document.addEventListener('keydown', onKeyDown)
+    return () => { document.removeEventListener('keydown', onKeyDown); previous?.focus() }
+  }, [fillTarget])
+
   if (fillTarget === null) return null
   return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="modal" role="dialog" aria-modal="true" aria-labelledby="fill-title">
-        <div className="panel-heading"><div><p className="eyebrow">SIMULATED FILL</p><h2 id="fill-title">记录成交 · #{fillTarget}</h2></div><button className="close-button" onClick={onClose} aria-label="关闭">×</button></div>
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <section ref={modalRef} className="modal" role="dialog" aria-modal="true" aria-labelledby="fill-title">
+        <div className="panel-heading"><div><p className="eyebrow">SIMULATED FILL</p><h2 id="fill-title">记录成交 · #{fillTarget}</h2></div><button ref={closeRef} type="button" className="close-button" onClick={onClose} aria-label="关闭">×</button></div>
         <form onSubmit={onSubmit}>
           <label htmlFor="fill-price">成交价格</label>
           <input id="fill-price" inputMode="decimal" value={fillPrice} onChange={(event) => setFillPrice(event.target.value)} autoFocus required />

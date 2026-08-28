@@ -26,6 +26,9 @@ export function useTrading(onLogout: () => void) {
     if (!window.location.hash) window.history.replaceState(null, '', '#overview')
     return () => window.removeEventListener('hashchange', syncView)
   }, [])
+  useEffect(() => {
+    requestAnimationFrame(() => document.getElementById(activeView)?.scrollIntoView({ behavior: 'smooth', block: 'start' }))
+  }, [activeView])
 
   // Ignore responses from superseded loads: concurrent refreshes must not let
   // a stale overview overwrite a newer one.
@@ -104,12 +107,13 @@ export function useTrading(onLogout: () => void) {
       setBusyAction('')
     }
   }
+  const fail = (message: string) => { setError(message); setNotice('') }
   const addContract = (event: FormEvent) => {
     event.preventDefault()
     const conid = Number(contractForm.conid)
     const symbol = contractForm.symbol.trim().toUpperCase()
-    if (!Number.isInteger(conid) || conid <= 0 || !symbol) return setError('请填写有效的合约 ConID 和代码。')
-    if (overview?.contracts.some((item) => item.conid === conid || item.symbol.toUpperCase() === symbol)) return setError('该合约已存在，请直接从下方选择。')
+    if (!Number.isInteger(conid) || conid <= 0 || !symbol) return fail('请填写有效的合约 ConID 和代码。')
+    if (overview?.contracts.some((item) => item.conid === conid || item.symbol.toUpperCase() === symbol)) return fail('该合约已存在，请直接从下方选择。')
     return action(async () => { await api('trading/contracts', json({ ...contractForm, conid, symbol, sec_type: 'STK' })); setContractForm({ conid: '', symbol: '', exchange: 'SMART', currency: 'USD' }) }, '合约已添加。', 'contract')
   }
   const placeOrder = (event: FormEvent) => {
@@ -119,9 +123,9 @@ export function useTrading(onLogout: () => void) {
     const needsStop = ['STP', 'STP_LMT'].includes(orderForm.order_type)
     const price = Number(orderForm.price)
     const stopPrice = Number(orderForm.stopPrice)
-    if (!orderForm.conid || !Number.isFinite(quantity) || quantity <= 0) return setError('请选择合约并填写有效数量。')
-    if (needsLimit && (!Number.isFinite(price) || price <= 0)) return setError('该订单必须填写有效限价。')
-    if (needsStop && (!Number.isFinite(stopPrice) || stopPrice <= 0)) return setError('该订单必须填写有效触发价。')
+    if (!orderForm.conid || !Number.isFinite(quantity) || quantity <= 0) return fail('请选择合约并填写有效数量。')
+    if (needsLimit && (!Number.isFinite(price) || price <= 0)) return fail('该订单必须填写有效限价。')
+    if (needsStop && (!Number.isFinite(stopPrice) || stopPrice <= 0)) return fail('该订单必须填写有效触发价。')
     return action(async () => {
       await api('trading/orders', json({
         conid: Number(orderForm.conid), side: orderForm.side, order_type: orderForm.order_type,
@@ -133,13 +137,13 @@ export function useTrading(onLogout: () => void) {
   const submitFill = (event: FormEvent) => {
     event.preventDefault()
     const price = Number(fillPrice)
-    if (fillTarget === null || !Number.isFinite(price) || price <= 0) return setError('请输入有效的成交价格。')
+    if (fillTarget === null || !Number.isFinite(price) || price <= 0) return fail('请输入有效的成交价格。')
     return action(async () => { await api(`trading/orders/${fillTarget}/fill`, json({ price: fillPrice })); setFillTarget(null); setFillPrice('') }, '模拟成交已记账。', `fill-${fillTarget}`)
   }
   const setCash = (event: FormEvent) => {
     event.preventDefault()
     const amount = Number(cashForm.amount)
-    if (!/^[a-zA-Z]{3}$/.test(cashForm.currency) || !Number.isFinite(amount) || amount <= 0) return setError('请填写有效的币种和正数金额。')
+    if (!/^[a-zA-Z]{3}$/.test(cashForm.currency) || !Number.isFinite(amount) || amount <= 0) return fail('请填写有效的币种和正数金额。')
     return action(async () => { await api('trading/cash', json({ ...cashForm, currency: cashForm.currency.toUpperCase() })) }, '现金余额已更新。', 'cash')
   }
   const logout = async () => { await api('auth/logout', { method: 'POST' }).catch(() => {}); onLogout() }
