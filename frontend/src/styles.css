@@ -109,6 +109,7 @@ input:disabled { color: var(--muted); background: var(--surface-container); }
 .user-pill { color: var(--on-primary-container); background: var(--surface-container); font-weight: 500; }
 .status-dot { width: 7px; height: 7px; background: #1a9b66; border-radius: 50%; }
 .status-dot-stale { background: #c17700; }
+.status-dot-loading { background: var(--outline); }
 .text-button, .install-button { min-height: 40px; font-size: 12px; font-weight: 700; }
 .text-button { padding: 4px 8px; color: var(--primary); background: none; border: 0; }
 .text-button:hover { background: var(--surface-container); border-radius: 99px; }

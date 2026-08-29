@@ -49,7 +49,7 @@ export function DashboardHeader({ email, currentView, dataState, installPrompt, 
       <div className="brand-line"><div className="mobile-brand-mark brand-mark small">ib</div><div><p className="eyebrow">{currentView.eyebrow}</p><h1>{currentView.title}</h1></div></div>
       <div className="header-actions">
         {installPrompt && <button type="button" className="install-button" onClick={onInstall}>安装应用</button>}
-        <span className={`sync-pill sync-${dataState}`}><span className="status-dot" />{syncLabel}</span>
+        <span className={`sync-pill sync-${dataState}`}><span className={`status-dot status-dot-${dataState}`} />{syncLabel}</span>
         <span className="user-pill"><span className="status-dot" aria-hidden="true" />{email}</span>
         <button type="button" className="text-button" onClick={onLogout}>退出登录</button>
       </div>
@@ -108,7 +108,7 @@ export function FillModal({ fillTarget, fillPrice, setFillPrice, busyAction, onC
     closeRef.current?.focus()
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Tab' || !modalRef.current) return
-      const focusable = modalRef.current.querySelectorAll<HTMLElement>('button, input, select, textarea, [href], [tabindex]:not([tabindex="-1"])')
+      const focusable = modalRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])')
       if (!focusable.length) return
       const first = focusable[0]
       const last = focusable[focusable.length - 1]

@@ -7,6 +7,7 @@ export function useTrading(onLogout: () => void) {
   const [activeView, setActiveView] = useState<View>(viewFromHash)
   const [overview, setOverview] = useState<Overview | null>(null)
   const [error, setError] = useState('')
+  const [loadFailed, setLoadFailed] = useState(false)
   const [notice, setNotice] = useState('')
   const [contractForm, setContractForm] = useState({ conid: '', symbol: '', exchange: 'SMART', currency: 'USD' })
   const [orderForm, setOrderForm] = useState({ conid: '', side: 'BUY', order_type: 'MKT', quantity: '100', price: '', stopPrice: '' })
@@ -38,11 +39,14 @@ export function useTrading(onLogout: () => void) {
     try {
       const data = await api<Overview>('trading/overview')
       if (sequence !== loadSeq.current) return
-      setOverview(data); setError(''); setLastUpdated(new Date())
+      setOverview(data); setError(''); setLoadFailed(false); setLastUpdated(new Date())
+      return true
     } catch (reason) {
       if (sequence !== loadSeq.current) return
       if (reason instanceof ApiError && reason.status === 401) return onLogout()
+      setLoadFailed(true)
       setError(reason instanceof Error ? reason.message : '无法读取交易数据')
+      return false
     }
   }
   useEffect(() => { load() }, [])
@@ -68,7 +72,7 @@ export function useTrading(onLogout: () => void) {
         if (views[index] !== activeView) { event.preventDefault(); window.location.hash = `#${views[index]}` }
         return
       }
-      if (event.key === 'r' || event.key === 'R') { event.preventDefault(); action(load, '数据已刷新。', 'refresh'); return }
+      if (event.key === 'r' || event.key === 'R') { event.preventDefault(); refresh(); return }
       if (event.key === 'Escape') setFillTarget(null)
     }
     window.addEventListener('keydown', onKeyDown)
@@ -103,6 +107,16 @@ export function useTrading(onLogout: () => void) {
     } catch (reason) {
       if (reason instanceof ApiError && reason.status === 401) return onLogout()
       setError(reason instanceof Error ? reason.message : '操作失败')
+    } finally {
+      setBusyAction('')
+    }
+  }
+  const refresh = async () => {
+    if (busyAction) return
+    setBusyAction('refresh')
+    setNotice('')
+    try {
+      if (await load()) setNotice('数据已刷新。')
     } finally {
       setBusyAction('')
     }
@@ -149,13 +163,13 @@ export function useTrading(onLogout: () => void) {
   const logout = async () => { await api('auth/logout', { method: 'POST' }).catch(() => {}); onLogout() }
 
   return {
-    activeView, overview, error, notice,
+    activeView, overview, error, loadFailed, notice,
     contractForm, setContractForm, orderForm, setOrderForm, cashForm, setCashForm,
     fillTarget, setFillTarget, fillPrice, setFillPrice,
     contractQuery, setContractQuery, orderFilter, setOrderFilter, orderPage, setOrderPage,
     expandedOrder, setExpandedOrder, busyAction, lastUpdated,
     symbols, visibleContracts, filteredOrders, pageCount, safeOrderPage, pageOrders,
     openOrders, filledOrders, filledQuantity, cashTotal, positionCost, latestFill, contractActivity,
-    load, action, addContract, placeOrder, cancel, submitFill, setCash, logout,
+    load, action, refresh, addContract, placeOrder, cancel, submitFill, setCash, logout,
   }
 }

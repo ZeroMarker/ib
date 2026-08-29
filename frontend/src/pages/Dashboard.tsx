@@ -21,9 +21,9 @@ export default function Dashboard({ user, onLogout, installPrompt, onInstalled }
       onInstalled()
     }
   }
-  const refresh = () => t.action(t.load, '数据已刷新。', 'refresh')
+  const refresh = t.refresh
   const currentView = viewMeta[t.activeView]
-  const dataState = t.error ? 'stale' : t.overview ? 'online' : 'loading'
+  const dataState = t.loadFailed ? 'stale' : t.overview ? 'online' : 'loading'
 
   return (
     <main className="dashboard-page">
@@ -38,7 +38,7 @@ export default function Dashboard({ user, onLogout, installPrompt, onInstalled }
             <WorkspaceNav activeView={t.activeView} openOrders={t.openOrders} positionsCount={t.overview.positions.length} fillsCount={t.overview.fills.length} lastUpdated={t.lastUpdated} busyAction={t.busyAction} onRefresh={refresh} />
             {t.activeView === 'overview' && <OverviewPage overview={t.overview} dataState={dataState === 'stale' ? 'stale' : 'online'} openOrders={t.openOrders} filledOrders={t.filledOrders} filledQuantity={t.filledQuantity} cashTotal={t.cashTotal} positionCost={t.positionCost} latestFill={t.latestFill} contractActivity={t.contractActivity} onNavigate={(view) => { window.location.hash = `#${view}` }} />}
             {t.activeView === 'trade' && <TradePage overview={t.overview} contractForm={t.contractForm} setContractForm={t.setContractForm} orderForm={t.orderForm} setOrderForm={t.setOrderForm} cashForm={t.cashForm} setCashForm={t.setCashForm} contractQuery={t.contractQuery} setContractQuery={t.setContractQuery} visibleContracts={t.visibleContracts} busyAction={t.busyAction} onAddContract={t.addContract} onPlaceOrder={t.placeOrder} onSetCash={t.setCash} />}
-            {t.activeView === 'orders' && <OrdersPage symbols={t.symbols} filteredOrders={t.filteredOrders} pageOrders={t.pageOrders} orderFilter={t.orderFilter} setOrderFilter={t.setOrderFilter} safeOrderPage={t.safeOrderPage} pageCount={t.pageCount} setOrderPage={t.setOrderPage} expandedOrder={t.expandedOrder} setExpandedOrder={t.setExpandedOrder} busyAction={t.busyAction} onRefresh={() => t.action(t.load, '订单已刷新。', 'refresh')} onCancel={t.cancel} onOpenFill={(order: Order) => { t.setFillTarget(order.order_id); t.setFillPrice(order.lmt_price ?? '') }} />}
+            {t.activeView === 'orders' && <OrdersPage symbols={t.symbols} filteredOrders={t.filteredOrders} pageOrders={t.pageOrders} orderFilter={t.orderFilter} setOrderFilter={t.setOrderFilter} safeOrderPage={t.safeOrderPage} pageCount={t.pageCount} setOrderPage={t.setOrderPage} expandedOrder={t.expandedOrder} setExpandedOrder={t.setExpandedOrder} busyAction={t.busyAction} onRefresh={refresh} onCancel={t.cancel} onOpenFill={(order: Order) => { t.setFillTarget(order.order_id); t.setFillPrice(order.lmt_price ?? '') }} />}
             {t.activeView === 'positions' && <PositionsPage positions={t.overview.positions} symbols={t.symbols} />}
             {t.activeView === 'fills' && <FillsPage fills={t.overview.fills} />}
           </>
