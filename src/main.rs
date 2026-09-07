@@ -5,19 +5,17 @@ mod trading;
 mod web;
 
 use models::*;
-use oracle::{pool::PoolBuilder, Connection, InitParams};
 use rust_decimal::Decimal;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
-use std::time::Duration;
 
 fn usage() -> ! {
     eprintln!(
         "usage: ib <command> [args]
 
 commands:
-  ping                                test Oracle connection
+  ping                                test SQLite connection
   serve [ADDR]                        run web frontend and auth API (default 127.0.0.1:8081)
   init-db                             create simulation trading schema
   init-auth                           add user and session tables to an existing database
@@ -43,71 +41,18 @@ fn decimal_arg(value: &str) -> Decimal {
     Decimal::from_str(value).unwrap_or_else(|_| usage())
 }
 
-fn database_config() -> (String, String, String, PathBuf) {
-    (
-        env::var("DB_USER").expect("DB_USER not set"),
-        env::var("DB_PASSWORD").expect("DB_PASSWORD not set"),
-        env::var("DB_DSN").expect("DB_DSN not set"),
-        PathBuf::from(env::var("DB_WALLET_DIR").expect("DB_WALLET_DIR not set")),
-    )
+fn database_config() -> PathBuf {
+    env::var("DB_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("ib.sqlite3"))
 }
 
-fn init_oracle_client(wallet_dir: &Path) {
-    assert!(
-        wallet_dir.join("tnsnames.ora").is_file(),
-        "wallet file missing: {}",
-        wallet_dir.join("tnsnames.ora").display()
-    );
-    assert!(
-        ["cwallet.sso", "ewallet.pem", "ewallet.p12"]
-            .iter()
-            .any(|name| wallet_dir.join(name).is_file()),
-        "wallet must contain cwallet.sso, ewallet.pem, or ewallet.p12"
-    );
-
-    // Point the Oracle client at the wallet directory: tnsnames.ora is resolved
-    // from there and the mTLS wallet is loaded automatically (config dir doubles
-    // as wallet location). DB_DSN must be the TNS alias in tnsnames.ora.
-    InitParams::new()
-        .oracle_client_config_dir(wallet_dir.to_str().expect("wallet dir not UTF-8"))
-        .expect("invalid wallet dir")
-        .init()
-        .expect("Oracle client initialization failed");
+fn connect() -> rusqlite::Connection {
+    db::open(&database_config())
 }
 
-fn connect() -> Connection {
-    let (user, password, dsn, wallet_dir) = database_config();
-    init_oracle_client(&wallet_dir);
-    Connection::connect(&user, &password, &dsn).expect("Oracle connection failed")
-}
-
-fn connect_pool() -> oracle::pool::Pool {
-    let (user, password, dsn, wallet_dir) = database_config();
-    init_oracle_client(&wallet_dir);
-    let max_connections = env::var("DB_POOL_MAX")
-        .unwrap_or_else(|_| "8".into())
-        .parse::<u32>()
-        .expect("DB_POOL_MAX must be a positive integer");
-    assert!(
-        max_connections > 0,
-        "DB_POOL_MAX must be a positive integer"
-    );
-
-    let mut builder = PoolBuilder::new(user, password, dsn);
-    builder
-        .min_connections(1)
-        .max_connections(max_connections)
-        .connection_increment(1)
-        .ping_interval(Some(Duration::from_secs(60)))
-        .expect("invalid Oracle pool ping interval")
-        .ping_timeout(Duration::from_secs(5))
-        .expect("invalid Oracle pool ping timeout")
-        .timeout(Duration::from_secs(30))
-        .expect("invalid Oracle pool timeout")
-        .max_lifetime_connection(Duration::from_secs(3600))
-        .expect("invalid Oracle pool connection lifetime")
-        .stmt_cache_size(50);
-    builder.build().expect("Oracle pool initialization failed")
+fn connect_pool() -> db::Pool {
+    db::Pool::new(connect())
 }
 
 #[tokio::main]
@@ -126,24 +71,21 @@ async fn main() {
         return;
     }
 
-    let mut conn = connect();
+    let conn = connect();
     match args[0].as_str() {
         "ping" => {
-            let (db_name, schema): (String, String) = conn
-                .query_row_as(
-                    "SELECT SYS_CONTEXT('USERENV','DB_NAME'), \
-                        SYS_CONTEXT('USERENV','CURRENT_SCHEMA') FROM dual",
-                    &[],
-                )
+            let version: String = conn
+                .query_row("SELECT sqlite_version()", [], |row| row.get(0))
                 .expect("query failed");
             println!(
-                "simulation database connection ok: db={} schema={}",
-                db_name, schema
+                "simulation database ok: sqlite={} path={}",
+                version,
+                database_config().display()
             );
         }
-        "init-db" => db::init_schema(&mut conn),
-        "init-auth" => db::init_auth_schema(&mut conn),
-        "drop-db" => db::drop_schema(&mut conn),
+        "init-db" => db::init_schema(&conn),
+        "init-auth" => db::init_auth_schema(&conn),
+        "drop-db" => db::drop_schema(&conn),
         "account" => match args.get(1).map(String::as_str) {
             Some("add") => {
                 let id = args.get(2).unwrap_or_else(|| usage());

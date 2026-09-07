@@ -1,6 +1,6 @@
-# ib — 模拟交易平台（Rust + Oracle）
+# ib — 模拟交易平台（Rust + SQLite）
 
-`ib` 是一个面向策略开发和纸上交易的模拟交易平台。它提供账户、合约、订单、模拟成交、持仓和现金账本，用 Oracle 保存状态，用 Rust 提供 CLI 操作入口。
+`ib` 是一个面向策略开发和纸上交易的模拟交易平台。它提供账户、合约、订单、模拟成交、持仓和现金账本，用 SQLite 保存状态，用 Rust 提供 CLI 操作入口。
 
 项目定位是模拟交易和交易账务演练，不是券商客户端：不会连接 Interactive Brokers 下单，也不会把任何订单发送到真实市场。当前的撮合入口是 `fill add`，由测试程序或策略适配器注入成交价；后续可以在此基础上接入行情、撮合规则、风控和回测时钟。
 
@@ -28,7 +28,7 @@
 | `POSITIONS` | 每账户/合约的多空持仓和平均成本 |
 | `CASH_BALANCES` | 每账户/币种的现金余额 |
 
-资金和数量最多支持 6 位小数，应用层使用 Decimal，数据库使用 `NUMBER(18,6)`。
+资金和数量最多支持 6 位小数，应用层使用 Decimal，数据库使用 INTEGER 微单位（1_000_000 = 1）存储，读写时缩放，保证定点精确往返。
 
 ## 构建
 
@@ -47,34 +47,17 @@ cd ..
 cargo build --release
 ```
 
-运行需要 Oracle Instant Client：
-
-```bash
-./scripts/setup-instantclient.sh linux.arm64   # x86_64 使用 linux.x64
-export LD_LIBRARY_PATH=$HOME/instantclient/instantclient_23_26:$LD_LIBRARY_PATH
-```
-
-Ubuntu 24.04 的 `libaio` 改名为 `libaio.so.1t64`，需要补一个软链接：
-
-```bash
-ln -sf /usr/lib/aarch64-linux-gnu/libaio.so.1t64 \
-    $HOME/instantclient/instantclient_23_26/libaio.so.1
-```
+无需安装任何数据库客户端：SQLite 以 `bundled` 特性静态编译进二进制，直接读写本地文件。
 
 ## 数据库连接
 
 ```bash
-export DB_USER=APP_USER
-export DB_PASSWORD=...
-export DB_DSN=<tnsnames 别名>
-export DB_WALLET_DIR=/home/ubuntu/oracle/wallet
-export TNS_ADMIN=$DB_WALLET_DIR
-export DB_POOL_MAX=8
+export DB_PATH=/var/lib/ib/ib.sqlite3
 ```
 
-钱包目录需要 `tnsnames.ora`，以及 `cwallet.sso`、`ewallet.pem` 或 `ewallet.p12` 之一。
+CLI 默认 `DB_PATH=./ib.sqlite3`（当前目录）；服务单元通过 `StateDirectory=ib` 使用 `/var/lib/ib/ib.sqlite3`（沙箱下可写，`ProtectHome=read-only` 不受影响）。父目录不存在会自动创建，首次使用前执行 `ib init-db` 建表。数据库以 WAL 模式打开，并启用 `foreign_keys` 外键约束。
 
-`ib serve` 使用 Oracle 连接池；`DB_POOL_MAX` 控制 Web 服务的最大连接数，默认值为 8。连接池会定期探活、等待连接超时，并回收达到生命周期的连接。`/api/health` 会实际执行数据库探活查询，数据库不可用时返回 HTTP 503。
+`ib serve` 使用单连接池（`Mutex<Connection>`）：SQLite 同一时刻只有一个写者，请求级持锁同时串行化了订单号分配。`/api/health` 会实际执行数据库探活查询，数据库不可用时返回 HTTP 503。
 
 ## 模拟交易示例
 

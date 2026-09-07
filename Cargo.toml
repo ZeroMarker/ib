@@ -2,12 +2,12 @@
 name = "ib"
 version = "0.1.0"
 edition = "2021"
-description = "Rust and Oracle simulation trading platform for paper trading and strategy development"
+description = "Rust and SQLite simulation trading platform for paper trading and strategy development"
 
 [dependencies]
 argon2 = "0.5"
 axum = "0.8"
-oracle = "0.6"
+rusqlite = { version = "0.40", features = ["bundled"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 chrono = "0.4"
 serde = { version = "1", features = ["derive"] }

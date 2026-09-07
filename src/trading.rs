@@ -1,6 +1,6 @@
 use crate::{
     auth::{self, AppState},
-    db,
+    db::{self, Pool},
     models::{Account, CashBalance, Contract, Fill, NewFill, NewOrder, Order, Position},
 };
 use axum::{
@@ -147,27 +147,24 @@ fn boxed_error(status: StatusCode, message: impl Into<String>) -> Box<Response> 
     Box::new(error(status, message))
 }
 
-/// Run blocking Oracle work on the dedicated blocking thread pool so slow
+/// Run blocking SQLite work on the dedicated blocking thread pool so slow
 /// queries never occupy a Tokio worker thread.
 async fn run_db<F>(state: AppState, task: F) -> Response
 where
-    F: FnOnce(&oracle::pool::Pool) -> Response + Send + 'static,
+    F: FnOnce(&Pool) -> Response + Send + 'static,
 {
     match tokio::task::spawn_blocking(move || task(&state.db)).await {
         Ok(response) => response,
-        Err(_) => error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal server error",
-        ),
+        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
     }
 }
 
 /// Acquire a pooled connection, authenticate the caller and ensure their
 /// simulation account exists. Call from inside `run_db` closures only.
-fn open_account_connection(
-    pool: &oracle::pool::Pool,
+fn open_account_connection<'a>(
+    pool: &'a Pool,
     headers: &HeaderMap,
-) -> Result<(oracle::Connection, String), Box<Response>> {
+) -> Result<(std::sync::MutexGuard<'a, rusqlite::Connection>, String), Box<Response>> {
     let conn = pool
         .get()
         .map_err(|_| boxed_error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"))?;
@@ -426,7 +423,10 @@ async fn place_order(
                 )
             }
         };
-        let order = NewOrder { order_id, ..candidate };
+        let order = NewOrder {
+            order_id,
+            ..candidate
+        };
         if let Err(message) = db::place_order(&conn, &order) {
             return error(StatusCode::BAD_REQUEST, message);
         }

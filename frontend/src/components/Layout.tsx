@@ -37,7 +37,7 @@ export function Sidebar({ activeView, openOrders, installPrompt, busyAction, onR
         <button type="button" className="sidebar-link sidebar-button" onClick={onRefresh} disabled={busyAction !== ''}><span aria-hidden="true">↻</span>同步数据</button>
         <button type="button" className="sidebar-link sidebar-button" onClick={onInstall} disabled={!installPrompt}><span aria-hidden="true">⇩</span>安装 PWA</button>
       </div>
-      <div className="sidebar-footer"><span className="status-dot" />模拟环境运行中<small>Oracle ledger · session safe · 1-5 切换视图</small></div>
+      <div className="sidebar-footer"><span className="status-dot" />模拟环境运行中<small>SQLite ledger · session safe · 1-5 切换视图</small></div>
     </aside>
   )
 }

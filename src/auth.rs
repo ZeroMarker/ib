@@ -1,3 +1,4 @@
+use crate::db::{Connection, Pool};
 use crate::web;
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
@@ -10,8 +11,8 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use oracle::{pool::Pool, Connection};
 use rand_core::OsRng;
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{net::SocketAddr, sync::Arc};
@@ -108,12 +109,17 @@ fn dummy_password_hash() -> &'static String {
 
 async fn health(State(state): State<AppState>) -> Response {
     run_db(state, |pool| {
-        match pool
+        let alive = pool
             .get()
-            .and_then(|conn| conn.query_row_as::<i64>("SELECT 1 FROM dual", &[]))
-        {
-            Ok(1) => Json(MessageResponse { message: "ok" }).into_response(),
-            Ok(_) | Err(_) => error(StatusCode::SERVICE_UNAVAILABLE, "database unavailable"),
+            .and_then(|conn| {
+                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                    .map_err(|_| "database unavailable".to_string())
+            })
+            .is_ok_and(|value| value == 1);
+        if alive {
+            Json(MessageResponse { message: "ok" }).into_response()
+        } else {
+            error(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
         }
     })
     .await
@@ -145,17 +151,17 @@ async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest
             Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
         };
 
+        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
+        }
         // A single INSERT lets the unique EMAIL index settle concurrent
         // registrations; no check-then-insert race window remains.
         if let Err(insert_error) = conn.execute(
-            "INSERT INTO USERS (USER_ID, EMAIL, PASSWORD_HASH) VALUES (:1, :2, :3)",
-            &[&user_id.as_str(), &email.as_str(), &password_hash.as_str()],
+            "INSERT INTO USERS (USER_ID, EMAIL, PASSWORD_HASH) VALUES (?1, ?2, ?3)",
+            params![user_id.as_str(), email.as_str(), password_hash.as_str()],
         ) {
-            let _ = conn.rollback();
-            let is_duplicate = insert_error
-                .db_error()
-                .is_some_and(|db_error| db_error.code() == 1);
-            return if is_duplicate {
+            let _ = conn.execute_batch("ROLLBACK");
+            return if is_unique_violation(&insert_error) {
                 error(StatusCode::CONFLICT, "email is already registered")
             } else {
                 error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
@@ -167,15 +173,15 @@ async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest
         let token = match insert_session(&conn, &user_id) {
             Ok(token) => token,
             Err(_) => {
-                let _ = conn.rollback();
+                let _ = conn.execute_batch("ROLLBACK");
                 return error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "could not create session",
                 );
             }
         };
-        if conn.commit().is_err() {
-            let _ = conn.rollback();
+        if conn.execute_batch("COMMIT").is_err() {
+            let _ = conn.execute_batch("ROLLBACK");
             return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
         }
 
@@ -200,10 +206,11 @@ async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) 
             Ok(conn) => conn,
             Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
         };
-        let (user_id, password_hash, verified): (String, String, i64) = match conn.query_row_as(
+        let (user_id, password_hash, verified): (String, String, i64) = match conn.query_row(
             "SELECT USER_ID, PASSWORD_HASH, EMAIL_VERIFIED FROM USERS \
-             WHERE EMAIL = :1 AND STATUS = 'ACTIVE'",
-            &[&email.as_str()],
+             WHERE EMAIL = ?1 AND STATUS = 'ACTIVE'",
+            params![email.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ) {
             Ok(row) => row,
             // Burn an Argon2 verification so unknown-email responses take the
@@ -226,10 +233,6 @@ async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) 
                 )
             }
         };
-        if conn.commit().is_err() {
-            let _ = conn.rollback();
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
-        }
 
         let response = UserResponse {
             user_id,
@@ -247,10 +250,9 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
             if let Ok(conn) = pool.get() {
                 let token_hash = hash_token(&token);
                 let _ = conn.execute(
-                    "DELETE FROM SESSIONS WHERE TOKEN_HASH = :1",
-                    &[&token_hash.as_str()],
+                    "DELETE FROM SESSIONS WHERE TOKEN_HASH = ?1",
+                    params![token_hash],
                 );
-                let _ = conn.commit();
             }
         }
         let cookie =
@@ -286,12 +288,13 @@ pub(crate) fn current_user(
     let token = session_token(headers).ok_or(StatusCode::UNAUTHORIZED)?;
     let token_hash = hash_token(&token);
     let (user_id, email, verified): (String, String, i64) = conn
-        .query_row_as(
+        .query_row(
             "SELECT U.USER_ID, U.EMAIL, U.EMAIL_VERIFIED \
              FROM SESSIONS S JOIN USERS U ON U.USER_ID = S.USER_ID \
-             WHERE S.TOKEN_HASH = :1 AND S.EXPIRES_AT > SYSTIMESTAMP \
+             WHERE S.TOKEN_HASH = ?1 AND S.EXPIRES_AT > datetime('now') \
                AND U.STATUS = 'ACTIVE'",
-            &[&token_hash.as_str()],
+            params![token_hash],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
     Ok(CurrentUser {
@@ -301,19 +304,25 @@ pub(crate) fn current_user(
     })
 }
 
-fn insert_session(conn: &Connection, user_id: &str) -> Result<String, oracle::Error> {
+fn insert_session(conn: &Connection, user_id: &str) -> Result<String, rusqlite::Error> {
     let token = Uuid::new_v4().to_string();
     let token_hash = hash_token(&token);
+    let session_id = Uuid::new_v4().to_string();
     conn.execute(
         "INSERT INTO SESSIONS (SESSION_ID, USER_ID, TOKEN_HASH, EXPIRES_AT) \
-         VALUES (:1, :2, :3, SYSTIMESTAMP + INTERVAL '30' DAY)",
-        &[
-            &Uuid::new_v4().to_string().as_str(),
-            &user_id,
-            &token_hash.as_str(),
-        ],
+         VALUES (?1, ?2, ?3, datetime('now', '+30 days'))",
+        params![session_id, user_id, token_hash],
     )?;
     Ok(token)
+}
+
+/// SQLite reports unique-index conflicts as extended code 2067
+/// (`SQLITE_CONSTRAINT_UNIQUE`).
+fn is_unique_violation(error: &rusqlite::Error) -> bool {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _) => failure.extended_code == 2067,
+        _ => false,
+    }
 }
 
 fn normalize_email(email: &str) -> Result<String, &'static str> {
