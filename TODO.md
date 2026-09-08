@@ -32,7 +32,8 @@
 
 ## 外部依赖待办
 
-- [ ] Resend 邮箱验证：需要真实 `RESEND_API_KEY`、发件域名和验证邮件模板；当前注册允许直接登录，`email_verified` 保持为 `false`。
+- [x] Resend 邮箱验证：`RESEND_API_KEY` 已接通（`src/email.rs` 经 `POST https://api.resend.com/emails` 发信，`RESEND_FROM`/`APP_BASE_URL` 见 `deploy/ib.env.example`）；注册只建账户发邮件不签发会话（201 无 Cookie），已配置 Resend 时未验证登录返回 403，`POST /api/auth/verify` 验证（一次有效）、`POST /api/auth/resend-verification` 重发，前端注册后转登录提示验证、登录 403 给重发入口、验证横幅支持重发/粘贴验证码/链接自动验证。未配置密钥时注册照常成功、`email_verified` 保持 `false` 且登录门禁降级（防锁死）。已用真实密钥冒烟：注册无 Cookie→登录 403→验证→登录 200 有 Cookie→`me` 已验证；无密钥时登录 200 降级。
+- [x] Resend 生产发信域名：`20070809.xyz` 已验证，生产 `RESEND_FROM=ib <verify@20070809.xyz>` + 真实密钥已写入 `/etc/ib/ib.env` 并重启，`APP_BASE_URL=https://ibkr.20070809.xyz`（线上 Caddy 实为 `ibkr` 子域名根路径，仓库 `deploy/Caddyfile` 已同步）。实测 `mark.chen.im@gmail.com` 重发 `ok`（日志无发送失败）、旧会话已清零，登录门禁全面生效。
 - [ ] 行情驱动撮合：需要行情源或回测时钟，当前仍由 `fill add` 注入成交。
 - [ ] 手续费、保证金和风控：需要明确模拟规则后实现。
 

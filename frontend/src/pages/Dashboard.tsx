@@ -8,7 +8,7 @@ import PositionsPage from './PositionsPage'
 import FillsPage from './FillsPage'
 import { Sidebar, DashboardHeader, MobileNav, VerifyNote, Alerts, WorkspaceNav, FillModal, DashboardFooter } from '../components/Layout'
 
-export default function Dashboard({ user, onLogout, installPrompt, onInstalled }: { user: AuthUser; onLogout: () => void; installPrompt: InstallPrompt | null; onInstalled: () => void }) {
+export default function Dashboard({ user, onLogout, onVerified, installPrompt, onInstalled }: { user: AuthUser; onLogout: () => void; onVerified: (user: AuthUser) => void; installPrompt: InstallPrompt | null; onInstalled: () => void }) {
   const t = useTrading(onLogout)
   const install = async () => {
     if (!installPrompt) return
@@ -31,7 +31,7 @@ export default function Dashboard({ user, onLogout, installPrompt, onInstalled }
       <div className="dashboard-content">
         <DashboardHeader email={user.email} currentView={currentView} dataState={dataState} installPrompt={installPrompt} onInstall={install} onLogout={t.logout} />
         <MobileNav activeView={t.activeView} />
-        <VerifyNote emailVerified={user.email_verified} />
+        <VerifyNote email={user.email} emailVerified={user.email_verified} onVerified={onVerified} />
         <Alerts error={t.error} notice={t.notice} busyAction={t.busyAction} onRetry={refresh} />
         {!t.overview ? <div className="loading-card">正在读取账户数据…</div> : (
           <>

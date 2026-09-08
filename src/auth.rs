@@ -38,6 +38,16 @@ struct AuthRequest {
     password: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct VerifyRequest {
+    token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResendRequest {
+    email: String,
+}
+
 #[derive(Debug, Serialize)]
 struct UserResponse {
     user_id: String,
@@ -76,6 +86,8 @@ pub async fn serve(pool: Pool, address: &str) {
         .route("/icons/icon.svg", get(web::icon_svg))
         .route("/api/health", get(health))
         .route("/api/auth/register", post(register))
+        .route("/api/auth/verify", post(verify))
+        .route("/api/auth/resend-verification", post(resend_verification))
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
@@ -134,65 +146,270 @@ async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest
         return error(StatusCode::BAD_REQUEST, message);
     }
 
-    run_db(state, move |pool| {
-        // Argon2 hashing costs tens of milliseconds; keep it off Tokio workers.
-        let password_hash = match hash_password(&request.password) {
-            Ok(hash) => hash,
+    // Blocking DB work stays off Tokio workers; the Resend HTTP send
+    // happens afterwards in async context.
+    let outcome = {
+        let state = state.clone();
+        let password = request.password.clone();
+        match tokio::task::spawn_blocking(move || register_in_db(&state.db, &email, &password))
+            .await
+        {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(response)) => return response,
             Err(_) => {
-                return error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "could not create account",
-                )
+                return error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
             }
-        };
-        let user_id = Uuid::new_v4().to_string();
+        }
+    };
+
+    // Registration never signs the user in: the account stays unverified
+    // until the emailed token is confirmed. Send failures only leave the
+    // account unverified; use resend-verification to retry.
+    if crate::email::is_configured() {
+        if let Err(send_error) =
+            crate::email::send_verification(&outcome.email, &outcome.verify_token).await
+        {
+            eprintln!(
+                "resend verification email failed for {}: {send_error}",
+                outcome.email
+            );
+        }
+    }
+
+    (StatusCode::CREATED, Json(outcome.user)).into_response()
+}
+
+struct RegisterOutcome {
+    user: UserResponse,
+    email: String,
+    verify_token: String,
+}
+
+
+fn register_in_db(pool: &Pool, email: &str, password: &str) -> Result<RegisterOutcome, Response> {
+    // Argon2 hashing costs tens of milliseconds; this runs in spawn_blocking.
+    let password_hash = match hash_password(password) {
+        Ok(hash) => hash,
+        Err(_) => {
+            return Err(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create account",
+            ));
+        }
+    };
+    let user_id = Uuid::new_v4().to_string();
+    let conn = match pool.get() {
+        Ok(conn) => conn,
+        Err(_) => {
+            return Err(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database unavailable",
+            ));
+        }
+    };
+
+    if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
+        return Err(error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database unavailable",
+        ));
+    }
+    // A single INSERT lets the unique EMAIL index settle concurrent
+    // registrations; no check-then-insert race window remains.
+    if let Err(insert_error) = conn.execute(
+        "INSERT INTO USERS (USER_ID, EMAIL, PASSWORD_HASH) VALUES (?1, ?2, ?3)",
+        params![user_id.as_str(), email, password_hash.as_str()],
+    ) {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(if is_unique_violation(&insert_error) {
+            error(StatusCode::CONFLICT, "email is already registered")
+        } else {
+            error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
+        });
+    }
+
+    ensure_verification_table(&conn);
+    let verify_token = match store_verification_token(&conn, &user_id) {
+        Ok(token) => token,
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            return Err(error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "could not create verification email",
+            ));
+        }
+    };
+    if conn.execute_batch("COMMIT").is_err() {
+        let _ = conn.execute_batch("ROLLBACK");
+        return Err(error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "database unavailable",
+        ));
+    }
+
+    Ok(RegisterOutcome {
+        user: UserResponse {
+            user_id: user_id.clone(),
+            email: email.to_owned(),
+            email_verified: false,
+        },
+        email: email.to_owned(),
+        verify_token,
+    })
+}
+
+async fn verify(State(state): State<AppState>, Json(request): Json<VerifyRequest>) -> Response {
+    let token = request.token.trim().to_owned();
+    if token.is_empty() {
+        return error(StatusCode::BAD_REQUEST, "verification token is required");
+    }
+    run_db(state, move |pool| {
         let conn = match pool.get() {
             Ok(conn) => conn,
             Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
         };
-
-        if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
-        }
-        // A single INSERT lets the unique EMAIL index settle concurrent
-        // registrations; no check-then-insert race window remains.
-        if let Err(insert_error) = conn.execute(
-            "INSERT INTO USERS (USER_ID, EMAIL, PASSWORD_HASH) VALUES (?1, ?2, ?3)",
-            params![user_id.as_str(), email.as_str(), password_hash.as_str()],
+        ensure_verification_table(&conn);
+        let token_hash = hash_token(&token);
+        let (user_id, expired): (String, bool) = match conn.query_row(
+            "SELECT USER_ID, EXPIRES_AT <= datetime('now') FROM EMAIL_VERIFICATIONS \
+             WHERE TOKEN_HASH = ?1",
+            params![token_hash],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         ) {
-            let _ = conn.execute_batch("ROLLBACK");
-            return if is_unique_violation(&insert_error) {
-                error(StatusCode::CONFLICT, "email is already registered")
-            } else {
-                error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
-            };
-        }
-
-        // TODO(resend): create a verification token and send it with Resend using RESEND_API_KEY.
-        // Registration remains usable until this adapter is implemented.
-        let token = match insert_session(&conn, &user_id) {
-            Ok(token) => token,
-            Err(_) => {
-                let _ = conn.execute_batch("ROLLBACK");
-                return error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "could not create session",
-                );
-            }
+            Ok(found) => found,
+            Err(_) => return error(StatusCode::BAD_REQUEST, "invalid verification token"),
         };
-        if conn.execute_batch("COMMIT").is_err() {
-            let _ = conn.execute_batch("ROLLBACK");
+        if expired {
+            let _ = conn.execute(
+                "DELETE FROM EMAIL_VERIFICATIONS WHERE TOKEN_HASH = ?1",
+                params![token_hash],
+            );
+            return error(StatusCode::GONE, "verification token has expired");
+        }
+        if conn
+            .execute(
+                "UPDATE USERS SET EMAIL_VERIFIED = 1 WHERE USER_ID = ?1",
+                params![user_id.as_str()],
+            )
+            .is_err()
+        {
             return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
         }
-
-        let response = UserResponse {
-            user_id,
-            email,
-            email_verified: false,
-        };
-        with_session_cookie(StatusCode::CREATED, token, Json(response))
+        let _ = conn.execute(
+            "DELETE FROM EMAIL_VERIFICATIONS WHERE USER_ID = ?1",
+            params![user_id.as_str()],
+        );
+        match conn.query_row(
+            "SELECT USER_ID, EMAIL FROM USERS WHERE USER_ID = ?1",
+            params![user_id.as_str()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            Ok((user_id, email)) => Json(UserResponse {
+                user_id,
+                email,
+                email_verified: true,
+            })
+            .into_response(),
+            Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
+        }
     })
     .await
+}
+
+async fn resend_verification(
+    State(state): State<AppState>,
+    Json(request): Json<ResendRequest>,
+) -> Response {
+    let email = match normalize_email(&request.email) {
+        Ok(email) => email,
+        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+    };
+    let minted = {
+        let state = state.clone();
+        match tokio::task::spawn_blocking(move || mint_verification_token(&state.db, &email)).await
+        {
+            Ok(minted) => minted,
+            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
+        }
+    };
+    // Never reveal whether an address is registered: unknown emails and
+    // already-verified accounts get the same generic success.
+    let (email, token) = match minted {
+        Some(pair) => pair,
+        None => return Json(MessageResponse { message: "ok" }).into_response(),
+    };
+    if !crate::email::is_configured() {
+        return error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "verification email is not configured",
+        );
+    }
+    match crate::email::send_verification(&email, &token).await {
+        Ok(()) => Json(MessageResponse { message: "ok" }).into_response(),
+        Err(send_error) => {
+            eprintln!("resend verification email failed for {email}: {send_error}");
+            error(
+                StatusCode::BAD_GATEWAY,
+                "could not send verification email",
+            )
+        }
+    }
+}
+
+/// Mint a fresh verification token for an unverified user.
+/// Returns `None` for unknown emails and already-verified accounts so the
+/// caller can answer with a generic success without leaking account state.
+fn mint_verification_token(pool: &Pool, email: &str) -> Option<(String, String)> {
+    let conn = pool.get().ok()?;
+    ensure_verification_table(&conn);
+    let (user_id, verified): (String, i64) = conn
+        .query_row(
+            "SELECT USER_ID, EMAIL_VERIFIED FROM USERS WHERE EMAIL = ?1 AND STATUS = 'ACTIVE'",
+            params![email],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .ok()?;
+    if verified == 1 {
+        return None;
+    }
+    // One outstanding token per user: replace any previous email's token so
+    // only the newest link verifies.
+    let _ = conn.execute(
+        "DELETE FROM EMAIL_VERIFICATIONS WHERE USER_ID = ?1",
+        params![user_id.as_str()],
+    );
+    let token = store_verification_token(&conn, &user_id).ok()?;
+    Some((email.to_owned(), token))
+}
+
+/// Create the verification table on demand so databases initialized before
+/// migration 003 keep working without a manual re-migration.
+fn ensure_verification_table(conn: &Connection) {
+    let _ = conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS EMAIL_VERIFICATIONS (
+            VERIFICATION_ID TEXT NOT NULL,
+            USER_ID         TEXT NOT NULL,
+            TOKEN_HASH      TEXT NOT NULL,
+            EXPIRES_AT      TEXT NOT NULL,
+            CREATED_AT      TEXT DEFAULT (datetime('now')) NOT NULL,
+            CONSTRAINT PK_EMAIL_VERIFICATIONS PRIMARY KEY (VERIFICATION_ID),
+            CONSTRAINT UQ_EMAIL_VERIFICATIONS_TOKEN UNIQUE (TOKEN_HASH),
+            CONSTRAINT FK_EMAIL_VERIFICATIONS_USER FOREIGN KEY (USER_ID) REFERENCES USERS (USER_ID)
+        );
+        CREATE INDEX IF NOT EXISTS IX_EMAIL_VERIFICATIONS_USER ON EMAIL_VERIFICATIONS (USER_ID);",
+    );
+}
+
+fn store_verification_token(conn: &Connection, user_id: &str) -> Result<String, rusqlite::Error> {
+    let token = Uuid::new_v4().to_string();
+    let token_hash = hash_token(&token);
+    let verification_id = Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO EMAIL_VERIFICATIONS (VERIFICATION_ID, USER_ID, TOKEN_HASH, EXPIRES_AT) \
+         VALUES (?1, ?2, ?3, datetime('now', '+24 hours'))",
+        params![verification_id, user_id, token_hash],
+    )?;
+    Ok(token)
 }
 
 async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) -> Response {
@@ -222,6 +439,15 @@ async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) 
         };
         if !verify_password(&request.password, &password_hash) {
             return error(StatusCode::UNAUTHORIZED, "invalid email or password");
+        }
+        // Verification is enforced only when the server can actually send
+        // verification emails; otherwise local/dev logins stay usable and
+        // the account remains unverified.
+        if verified != 1 && crate::email::is_configured() {
+            return error(
+                StatusCode::FORBIDDEN,
+                "email not verified; check your inbox for the verification email",
+            );
         }
 
         let token = match insert_session(&conn, &user_id) {

@@ -121,6 +121,11 @@ pub fn init_schema(conn: &Connection) {
         include_str!("../migrations/002_auth_schema.sql"),
         "002_auth_schema.sql",
     );
+    apply_migration(
+        conn,
+        include_str!("../migrations/003_email_verification.sql"),
+        "003_email_verification.sql",
+    );
     println!("schema created");
 }
 
@@ -130,11 +135,17 @@ pub fn init_auth_schema(conn: &Connection) {
         include_str!("../migrations/002_auth_schema.sql"),
         "002_auth_schema.sql",
     );
+    apply_migration(
+        conn,
+        include_str!("../migrations/003_email_verification.sql"),
+        "003_email_verification.sql",
+    );
     println!("auth schema created");
 }
 
 pub fn drop_schema(conn: &Connection) {
     for table in [
+        "EMAIL_VERIFICATIONS",
         "SESSIONS",
         "USERS",
         "CASH_BALANCES",

@@ -1,5 +1,6 @@
 mod auth;
 mod db;
+mod email;
 mod models;
 mod trading;
 mod web;

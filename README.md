@@ -92,8 +92,8 @@ ib serve
 
 接口包括：
 
-- `POST /api/auth/register`：`{"email":"user@example.com","password":"..."}`
-- `POST /api/auth/login`：登录并设置 HttpOnly 会话 Cookie
+- `POST /api/auth/register`：`{"email":"user@example.com","password":"..."}`，只创建账户并发送验证邮件，不签发会话（201 无 Cookie）
+- `POST /api/auth/login`：登录并设置 HttpOnly 会话 Cookie；已配置 Resend 时未验证邮箱返回 403，需先验证
 - `POST /api/auth/logout`：注销当前会话
 - `GET /api/auth/me`：读取当前登录用户
 - `GET /api/health`：健康检查
@@ -107,15 +107,15 @@ ib serve
 - `POST /api/trading/orders/{order_id}/fill`：注入当前用户订单的模拟成交
 - `GET /api/trading/positions`、`GET /api/trading/cash`、`POST /api/trading/cash`、`GET /api/trading/fills`
 
-密码使用 Argon2 哈希，会话只在数据库保存令牌哈希。邮箱验证发送预留了 Resend TODO；在邮件适配器完成前，新用户可以直接登录，但 `email_verified` 为 `false`。
+密码使用 Argon2 哈希，会话只在数据库保存令牌哈希。注册时创建 24 小时有效的邮箱验证码并经 Resend 发送（`POST https://api.resend.com/emails`），验证链接形如 `/?verify_token=...`；验证接口为 `POST /api/auth/verify`（`{"token":"..."}`，一次有效，过期返回 410），重发为 `POST /api/auth/resend-verification`（`{"email":"..."}`，未知邮箱与已验证账户返回同样的通用成功，避免枚举账户）。
 
-Resend 接入完成后通过 `RESEND_API_KEY` 配置密钥；当前版本不会读取或发送邮件。
+Resend 通过 `RESEND_API_KEY`（必填）、`RESEND_FROM`（默认 `ib <onboarding@resend.dev>`，生产需换成已验证域名）和 `APP_BASE_URL`（默认 `http://127.0.0.1:8081`，生产如 `https://ibkr.20070809.xyz`）配置，见 `deploy/ib.env.example`。未配置密钥时注册照常成功但 `email_verified` 保持 `false`，绝不伪造已验证；此时登录门禁自动降级（未验证也可登录，防本地/开发环境锁死），发送失败只记日志（`eprintln!`），同样不影响注册。已有老库执行 `ib init-auth` 即可补上 `EMAIL_VERIFICATIONS` 表（新代码在写入前也会 `CREATE TABLE IF NOT EXISTS` 自愈）。
 
-前端页面由同一个 Rust 服务提供，包含登录、注册、登录态恢复、用户信息、模拟账户、合约、下单、撤单、模拟成交、持仓和现金账本视图。每个登录用户按用户 ID 获得一个稳定的模拟账户。前端同时提供 PWA Manifest、192/512 图标和 Service Worker：交易 API 不进入离线缓存，离线时只保留页面壳。直接访问 `/`，或通过 Caddy 访问 `/public/ibkr/` 即可打开页面。
+前端页面由同一个 Rust 服务提供，包含登录、注册、登录态恢复、用户信息、模拟账户、合约、下单、撤单、模拟成交、持仓和现金账本视图。每个登录用户按用户 ID 获得一个稳定的模拟账户。前端同时提供 PWA Manifest、192/512 图标和 Service Worker：交易 API 不进入离线缓存，离线时只保留页面壳。直接访问 `https://ibkr.20070809.xyz/` 即可打开页面。
 
 ## Caddy 部署
 
-`deploy/Caddyfile` 将 `https://20070809.xyz/public/ibkr/` 反向代理到本机的 `127.0.0.1:8081`，并移除外部路径前缀。启动服务后将该配置加入 Caddy：
+`deploy/Caddyfile` 将 `https://ibkr.20070809.xyz/` 反向代理到本机的 `127.0.0.1:8081`。启动服务后将该配置加入 Caddy：
 
 ```bash
 caddy validate --config deploy/Caddyfile

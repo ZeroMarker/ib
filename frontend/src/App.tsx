@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import Dashboard from './pages/Dashboard'
-import { api, json } from './api'
+import { ApiError, api, json } from './api'
 import type { AuthUser, InstallPrompt } from './types'
 
 export function App() {
@@ -21,7 +21,7 @@ export function App() {
 
   if (booting) return <div className="loading-screen">正在载入模拟交易空间…</div>
   return user
-    ? <Dashboard user={user} onLogout={() => setUser(null)} installPrompt={installPrompt} onInstalled={() => setInstallPrompt(null)} />
+    ? <Dashboard user={user} onLogout={() => setUser(null)} onVerified={setUser} installPrompt={installPrompt} onInstalled={() => setInstallPrompt(null)} />
     : <Auth onAuthenticated={setUser} />
 }
 
@@ -31,15 +31,58 @@ function Auth({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }
   const [password, setPassword] = useState('')
   const [message, setMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [needsResend, setNeedsResend] = useState(false)
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const linkToken = params.get('verify_token')
+    if (!linkToken) return
+    window.history.replaceState(null, '', window.location.pathname + window.location.hash)
+    ;(async () => {
+      try {
+        await api<AuthUser>('auth/verify', json({ token: linkToken }))
+        setMode('login')
+        setMessage('邮箱验证成功，请登录。')
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : '验证失败')
+      }
+    })()
+  }, [])
 
   const submit = async (event: FormEvent) => {
     event.preventDefault()
     setMessage('')
+    setNeedsResend(false)
     setSubmitting(true)
     try {
-      onAuthenticated(await api<AuthUser>(`auth/${mode}`, json({ email, password })))
+      if (mode === 'register') {
+        const user = await api<AuthUser>('auth/register', json({ email, password }))
+        setMode('login')
+        setMessage(`验证邮件已发送至 ${user.email}（含垃圾箱），请在 24 小时内验证后再登录。`)
+        return
+      }
+      onAuthenticated(await api<AuthUser>('auth/login', json({ email, password })))
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '请求失败')
+      if (error instanceof ApiError && error.status === 403) {
+        setMessage('邮箱尚未验证：请查收验证邮件（含垃圾箱），或重发一封。')
+        setNeedsResend(true)
+      } else {
+        setMessage(error instanceof Error ? error.message : '请求失败')
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  const resend = async () => {
+    if (submitting || !email) return
+    setSubmitting(true)
+    try {
+      await api<unknown>('auth/resend-verification', json({ email }))
+      setMessage(`验证邮件已发送至 ${email}（含垃圾箱），请在 24 小时内验证后再登录。`)
+      setNeedsResend(false)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '发送失败')
     } finally {
       setSubmitting(false)
     }
@@ -56,12 +99,13 @@ function Auth({ onAuthenticated }: { onAuthenticated: (user: AuthUser) => void }
       </section>
       <section className="auth-card" aria-label="用户认证">
         <div className="tabs"><button className={mode === 'login' ? 'tab active' : 'tab'} onClick={() => setMode('login')}>登录</button><button className={mode === 'register' ? 'tab active' : 'tab'} onClick={() => setMode('register')}>注册</button></div>
-        <div className="card-heading"><p className="eyebrow">{mode === 'login' ? 'WELCOME BACK' : 'START SIMULATING'}</p><h2>{mode === 'login' ? '登录账户' : '创建账户'}</h2><p>{mode === 'login' ? '进入你的模拟交易空间。' : '开始你的纸上交易旅程。'}</p></div>
+        <div className="card-heading"><p className="eyebrow">{mode === 'login' ? 'WELCOME BACK' : 'START SIMULATING'}</p><h2>{mode === 'login' ? '登录账户' : '创建账户'}</h2><p>{mode === 'login' ? '进入你的模拟交易空间。' : '开始你的纸上交易旅程。注册后验证邮件将发送至你的邮箱。'}</p></div>
         <form onSubmit={submit}>
           <label htmlFor="email">邮箱</label><input id="email" type="email" autoComplete="email" placeholder="you@example.com" value={email} onChange={(event) => setEmail(event.target.value)} required />
           <label htmlFor="password">密码</label><input id="password" type="password" autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="至少 8 位" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} required />
           <button className="primary-button" disabled={submitting}>{submitting ? '处理中…' : mode === 'login' ? '登录' : '注册'}</button>
           <p className="form-message">{message}</p>
+          {needsResend && <button type="button" className="alert-action" disabled={submitting} onClick={resend}>重发验证邮件</button>}
         </form>
         <p className="legal">继续即表示你了解这是模拟交易服务，不会发送真实订单。</p>
       </section>

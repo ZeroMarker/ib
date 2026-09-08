@@ -1,5 +1,6 @@
-import { useEffect, useRef, type FormEvent } from 'react'
-import type { InstallPrompt, View } from '../types'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { api, json } from '../api'
+import type { AuthUser, InstallPrompt, View } from '../types'
 
 type DataState = 'loading' | 'online' | 'stale'
 
@@ -67,8 +68,72 @@ export function MobileNav({ activeView }: { activeView: View }) {
   )
 }
 
-export function VerifyNote({ emailVerified }: { emailVerified: boolean }) {
-  return <div className="verify-note">{emailVerified ? '邮箱已验证。' : '邮箱验证将在 Resend 邮件服务接入后开放。'}</div>
+export function VerifyNote({ email, emailVerified, onVerified }: { email: string; emailVerified: boolean; onVerified: (user: AuthUser) => void }) {
+  const [token, setToken] = useState('')
+  const [message, setMessage] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const linkToken = params.get('verify_token')
+    if (!linkToken || emailVerified) return
+    setToken(linkToken)
+    window.history.replaceState(null, '', window.location.pathname + window.location.hash)
+    ;(async () => {
+      setBusy(true)
+      try {
+        onVerified(await api<AuthUser>('auth/verify', json({ token: linkToken })))
+        setMessage('邮箱验证成功。')
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : '验证失败')
+      } finally {
+        setBusy(false)
+      }
+    })()
+  }, [emailVerified, onVerified])
+
+  if (emailVerified) return <div className="verify-note">邮箱已验证。</div>
+
+  const submitToken = async (event: FormEvent) => {
+    event.preventDefault()
+    if (!token.trim() || busy) return
+    setBusy(true)
+    setMessage('')
+    try {
+      onVerified(await api<AuthUser>('auth/verify', json({ token: token.trim() })))
+      setMessage('邮箱验证成功。')
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '验证失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const resend = async () => {
+    if (busy) return
+    setBusy(true)
+    setMessage('')
+    try {
+      await api<unknown>('auth/resend-verification', json({ email }))
+      setMessage(`验证邮件已发送至 ${email}，请在 24 小时内查收（含垃圾箱）。`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '发送失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="verify-note">
+      <span>邮箱 {email} 尚未验证，请查收验证邮件（含垃圾箱）。</span>{' '}
+      <button type="button" className="alert-action" disabled={busy} onClick={resend}>重发邮件</button>
+      <form onSubmit={submitToken} style={{ display: 'inline-flex', gap: 8, marginLeft: 12 }}>
+        <input aria-label="邮箱验证码" placeholder="粘贴验证码" value={token} onChange={(event) => setToken(event.target.value)} />
+        <button type="submit" className="alert-action" disabled={busy || !token.trim()}>验证</button>
+      </form>
+      {message && <span style={{ marginLeft: 12 }}>{message}</span>}
+    </div>
+  )
 }
 
 export function Alerts({ error, notice, busyAction, onRetry }: { error: string; notice: string; busyAction: string; onRetry: () => void }) {
