@@ -24,3 +24,6 @@ target
 *.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
+
+# Local secrets (e.g. RESEND_API_KEY); production uses /etc/ib/ib.env
+.env
