@@ -5,8 +5,11 @@
 -- The app scales Decimal values by 10^6 before storing and divides on read,
 -- so six-decimal fixed-point values round-trip exactly with no binary
 -- floating-point error.
+--
+-- Every statement is IF NOT EXISTS so that a database created before the
+-- migration ledger existed (see SCHEMA_MIGRATIONS) can still be re-initialized.
 
-CREATE TABLE CONTRACTS (
+CREATE TABLE IF NOT EXISTS CONTRACTS (
     CONID      INTEGER       NOT NULL,
     SYMBOL     TEXT          NOT NULL,
     SEC_TYPE   TEXT          NOT NULL,  -- STK / OPT / FUT / CASH / BAG
@@ -21,7 +24,7 @@ CREATE TABLE CONTRACTS (
     CONSTRAINT CK_CONTRACTS_SEC CHECK (SEC_TYPE IN ('STK','OPT','FUT','CASH','BAG','IND'))
 );
 
-CREATE TABLE ACCOUNTS (
+CREATE TABLE IF NOT EXISTS ACCOUNTS (
     ACCOUNT_ID   TEXT         NOT NULL,       -- e.g. U1234567
     ACCOUNT_TYPE TEXT         DEFAULT 'MARGIN' NOT NULL,  -- CASH / MARGIN / IRA
     CURRENCY     TEXT         DEFAULT 'USD' NOT NULL,
@@ -33,7 +36,7 @@ CREATE TABLE ACCOUNTS (
 );
 
 -- Simulation order states, compatible with common broker terminology
-CREATE TABLE ORDERS (
+CREATE TABLE IF NOT EXISTS ORDERS (
     PERM_ID        INTEGER       DEFAULT NULL,  -- assigned on acceptance
     ORDER_ID       INTEGER       NOT NULL,      -- client-side id
     ACCOUNT_ID     TEXT          NOT NULL,
@@ -66,7 +69,7 @@ CREATE TABLE ORDERS (
     CONSTRAINT CK_ORDERS_AVG_PRICE CHECK (AVG_FILL_PRICE IS NULL OR AVG_FILL_PRICE > 0)
 );
 
-CREATE TABLE FILLS (
+CREATE TABLE IF NOT EXISTS FILLS (
     EXEC_ID    TEXT          NOT NULL,
     ORDER_ID   INTEGER       NOT NULL,
     ACCOUNT_ID TEXT          NOT NULL,
@@ -84,10 +87,10 @@ CREATE TABLE FILLS (
     CONSTRAINT CK_FILLS_SIDE CHECK (SIDE IN ('BUY','SELL'))
 );
 
-CREATE INDEX IX_FILLS_ORDER ON FILLS (ORDER_ID, ACCOUNT_ID);
+CREATE INDEX IF NOT EXISTS IX_FILLS_ORDER ON FILLS (ORDER_ID, ACCOUNT_ID);
 
 -- Simulation position snapshot per account/contract/currency
-CREATE TABLE POSITIONS (
+CREATE TABLE IF NOT EXISTS POSITIONS (
     ACCOUNT_ID  TEXT          NOT NULL,
     CONID       INTEGER       NOT NULL,
     POSITION    INTEGER       NOT NULL,   -- signed micro-units: long +, short -
@@ -100,7 +103,7 @@ CREATE TABLE POSITIONS (
 );
 
 -- Cash balances per simulation account currency, in micro-units
-CREATE TABLE CASH_BALANCES (
+CREATE TABLE IF NOT EXISTS CASH_BALANCES (
     ACCOUNT_ID  TEXT          NOT NULL,
     CURRENCY    TEXT          NOT NULL,
     CASH        INTEGER       DEFAULT 0 NOT NULL,

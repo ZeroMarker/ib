@@ -1,12 +1,54 @@
 # 项目待办与执行记录
 
-更新时间：2026-08-26
+更新时间：2026-09-29
 
 ## 当前结论
 
-项目已经具备 SQLite 数据库连接、模拟交易账本、用户注册登录、终端式前端、Caddy 和 systemd 部署能力。当前前端已完成从基础表单到模拟交易终端的体验升级，后续重点转向行情、资产估值和风控能力。
+项目已经具备 SQLite 数据库连接、模拟交易账本、用户注册登录、终端式前端、Caddy 和 systemd 部署能力。质量门禁（CI、fmt/clippy、Prettier/ESLint/Vitest）与集成测试已就位，后续重点转向行情、资产估值和风控能力。
 
-## 本轮执行（2026-08-27）
+## 本轮执行（2026-09-29）：质量加固与重构
+
+### 质量门禁
+
+- [x] 新增 CI（`.github/workflows/ci.yml`）：后端 `fmt`/`clippy -D warnings`/测试，前端 `format:check`/`lint`/`test`/`build`；后端先构建前端产物（`include_str!` 依赖 `frontend/dist`）。
+- [x] 前端接入 Prettier + ESLint 10（flat config、`typescript-eslint`、React Hooks、Vitest 5 + Testing Library），`npm run check` 一键跑格式/静态/测试。
+- [x] 清理依赖漏洞：`npm audit` 0 vulnerabilities（升级到 eslint@10、vitest@5）。
+
+### 真实缺陷修复
+
+- [x] `email.rs` 每次发信都新建 `reqwest::Client` 且无超时：改为 `LazyLock` 单例共享连接池，并加 5s 连接 / 10s 请求超时，避免 Resend 挂起时请求永久阻塞。
+- [x] 服务无优雅关停：`systemctl stop` 会直接丢弃进行中的账本写入。`axum::serve` 改为 `with_graceful_shutdown`，监听 SIGINT/SIGTERM 先排空连接再退出（已实测 SIGTERM 干净退出）。
+- [x] `SESSIONS` / `EMAIL_VERIFICATIONS` 过期行只过滤不删除，表格无限增长：新增 `004_maintenance_indexes.sql` 与登录时的 `purge_expired` 清理。
+- [x] 迁移按 `;` 朴素切分，字符串字面量或触发器体内的分号会破坏 SQL：改为跟踪引号跨度的切分器。
+- [x] `resend-verification` 在未配置 Resend 时对已知邮箱返回 503、未知邮箱返回 200，构成账户枚举预言机：统一为通用 `ok`，失败只记日志。
+- [x] clippy `result_large_err`：`Box<Response>` 被穿过数据层传递，改为小枚举 `ApiError`（`src/http.rs`），handler 可用 `?`。
+
+### 结构重构
+
+- [x] 迁移版本表 `SCHEMA_MIGRATIONS`：`init-db` 幂等，已应用迁移跳过；001/002 全部 `CREATE ... IF NOT EXISTS` 以兼容无账本的存量库。
+- [x] 抽出 `src/lib.rs`（库目标）+ 瘦 `main.rs`（CLI），使 `tests/` 能驱动真实 router；CLI 参数收敛到 `Args` 访问器，缺失参数打印 usage 而非下标越界。
+- [x] `web.rs` 8 个资产处理器收敛为 `text_asset`/`binary_asset` 两个helper（PNG 走字节路径）。
+- [x] 删除 `trading.rs` 7 个与 `models` 一一对应的 Response 结构体和映射函数：`models.rs` 直接 `#[derive(Serialize)]`，`Decimal` 序列化为规范化字符串。
+- [x] `db.rs` 4 处「可选过滤参数」样板统一为 `collect_rows` + `(?1 IS NULL OR ...)` 查询。
+- [x] 前端：`PositionsPage`/`FillsPage`/`OrdersPage`/`OverviewPage`/`TradePage`/`Dashboard` 由单行巨型 JSX 拆为具名子组件与常量表；`components.tsx` 归位为 `components/index.tsx`。
+
+### 前端正确性与性能
+
+- [x] 修复 `useTrading` 的 TDZ 缺陷：`r` 快捷键在声明前引用 `refresh`，ESLint 报 `Cannot access variable before it is declared`。
+- [x] 键盘监听由「每次渲染重新订阅」改为「订阅一次 + ref 读当前状态」。
+- [x] 派生状态改为 `useMemo` + 单次 `summarize`：`contractActivity` 原为 O(合约×订单+持仓) 每渲染重算。
+- [x] `App.tsx` 的 `onLogout` 用 `useCallback` 稳定化，否则每次 App 渲染都会触发一次 overview 重新请求。
+- [x] 订单类型下拉的字段绑定重写（原 `isLimitOnly` 判断与 id/label 有错配风险），`STP_LMT` 限价字段 id 唯一。
+- [x] 验证链接 token 改为惰性初值 + 仅 mount 消费一次，避免 effect 内同步 setState 与重复消费已用 token。
+- [x] 移除内联 style，改为 `.verify-token-form` / `.verify-message` CSS 类。
+
+### 测试
+
+- [x] 后端 18 个单元测试（原 9）：迁移幂等与账本、迁移切分、过期行清理、序列化格式、静态资源 no-store 等。
+- [x] 新增 `tests/api.rs` 19 个端到端测试：真实 socket + 临时 SQLite 库，覆盖注册/登录/登出、401 门禁、跨用户数据隔离、订单→成交→账本闭环、`exec_id` 幂等、撤单不可再成交、订单号按账户递增、过期会话回收。
+- [x] 前端 45 个测试：API 客户端、路由派生、组件、订单/持仓/成交页、`useTrading` 汇总与校验。
+
+## 历史执行（2026-08-27）
 
 - [x] 前端结构重构：拆分 `src/main.tsx` 单体为 `api.ts` 客户端、`App.tsx`（App/Auth）、`hooks/useTrading.ts`（工作台状态与操作）、`components/Layout.tsx`（侧边栏/顶栏/导航/成交弹窗）与 `pages/Dashboard.tsx`，消除 props 钻取与单体堆积。
 
@@ -42,9 +84,9 @@
 - [ ] 账户资产净值、未实现盈亏和行情快照。
 - [x] 分页、筛选、订单详情和成交明细。
 - [ ] 管理员与普通用户权限分离。
-- [ ] 数据库迁移版本表和可重复执行迁移。
-- [ ] 集成测试：SQLite 测试库（内存或临时文件）、登录态、订单到成交账务闭环。
-- [x] 将同步 Oracle 调用迁移到 `spawn_blocking`，避免慢查询占用 Tokio 工作线程。
+- [x] 数据库迁移版本表和可重复执行迁移（`SCHEMA_MIGRATIONS` + 幂等 DDL）。
+- [x] 集成测试：临时 SQLite 库、登录态、订单到成交账务闭环（`tests/api.rs`，19 例）。
+- [x] 将同步数据库调用迁移到 `spawn_blocking`，避免慢查询占用 Tokio 工作线程。
 
 ## 前端功能待办
 

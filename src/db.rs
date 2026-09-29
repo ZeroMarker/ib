@@ -64,21 +64,72 @@ fn commit(conn: &Connection, what: &str) -> Result<(), String> {
     })
 }
 
-fn apply_migration(conn: &Connection, sql: &str, name: &str) {
-    for part in sql.split(';') {
-        let stmt: String = part
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("--"))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string();
-        if !stmt.is_empty() {
-            conn.execute_batch(&stmt)
-                .unwrap_or_else(|e| panic!("SQL failed: {e}\n{stmt}"));
-            println!("ok [{name}]: {}", stmt.lines().next().unwrap_or("").trim());
+/// Strip `--` comment lines and yield one statement per `;` terminator.
+///
+/// This is a deliberately small parser: the migrations in this repository are
+/// plain DDL with no string literals or `BEGIN ... END` trigger bodies, both
+/// of which a naive `;` split would corrupt. It tracks single- and
+/// double-quoted spans so a semicolon or `--` inside a literal survives.
+fn split_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    for line in sql.lines() {
+        let trimmed = line.trim_start();
+        if quote.is_none() && trimmed.starts_with("--") {
+            continue;
         }
+        for character in line.chars() {
+            match quote {
+                Some(open) if character == open => quote = None,
+                Some(_) => {}
+                None => match character {
+                    '\'' | '"' => quote = Some(character),
+                    _ => {}
+                },
+            }
+            if character == ';' && quote.is_none() {
+                let statement = current.trim().to_owned();
+                if !statement.is_empty() {
+                    statements.push(statement);
+                }
+                current.clear();
+                continue;
+            }
+            current.push(character);
+        }
+        current.push('\n');
     }
+    let trailing = current.trim().to_owned();
+    if !trailing.is_empty() {
+        statements.push(trailing);
+    }
+    statements
+}
+
+fn apply_migration(conn: &Connection, sql: &str, name: &str) {
+    for statement in split_statements(sql) {
+        conn.execute_batch(&statement)
+            .unwrap_or_else(|error| panic!("SQL failed in {name}: {error}\n{statement}"));
+        println!(
+            "ok [{name}]: {}",
+            statement.lines().next().unwrap_or("").trim()
+        );
+    }
+}
+
+/// Collect every row from a prepared statement, panicking on a row-level
+/// error. Every list in this module already treats a query failure as fatal,
+/// so this removes ~8 copies of the same three-line collect chain.
+fn collect_rows<T>(
+    stmt: &mut rusqlite::Statement<'_>,
+    params: impl rusqlite::Params,
+    map: impl FnMut(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Vec<T> {
+    stmt.query_map(params, map)
+        .expect("query failed")
+        .map(|row| row.expect("row error"))
+        .collect()
 }
 
 fn decimal_at(row: &rusqlite::Row, index: usize) -> Decimal {
@@ -110,40 +161,87 @@ fn scaled_round(value: &Decimal) -> Result<i64, Box<dyn Error>> {
         .ok_or_else(|| format!("value {value} is outside the fixed-point range").into())
 }
 
-pub fn init_schema(conn: &Connection) {
-    apply_migration(
-        conn,
-        include_str!("../migrations/001_simulation_schema.sql"),
+/// Migrations embedded in the binary, applied in order.
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
         "001_simulation_schema.sql",
-    );
-    apply_migration(
-        conn,
-        include_str!("../migrations/002_auth_schema.sql"),
+        include_str!("../migrations/001_simulation_schema.sql"),
+    ),
+    (
         "002_auth_schema.sql",
-    );
-    apply_migration(
-        conn,
-        include_str!("../migrations/003_email_verification.sql"),
+        include_str!("../migrations/002_auth_schema.sql"),
+    ),
+    (
         "003_email_verification.sql",
-    );
+        include_str!("../migrations/003_email_verification.sql"),
+    ),
+    (
+        "004_maintenance_indexes.sql",
+        include_str!("../migrations/004_maintenance_indexes.sql"),
+    ),
+];
+
+pub fn init_schema(conn: &Connection) {
+    apply_migrations(conn, MIGRATIONS);
     println!("schema created");
 }
 
+/// Append the auth tables to a database that already has trading data.
+/// Mirrors `init_schema` minus the trading migration, so an existing
+/// deployment can gain login support without touching its ledger.
 pub fn init_auth_schema(conn: &Connection) {
-    apply_migration(
-        conn,
-        include_str!("../migrations/002_auth_schema.sql"),
-        "002_auth_schema.sql",
-    );
-    apply_migration(
-        conn,
-        include_str!("../migrations/003_email_verification.sql"),
-        "003_email_verification.sql",
-    );
+    let migrations: Vec<(&str, &str)> = MIGRATIONS
+        .iter()
+        .filter(|(name, _)| *name != "001_simulation_schema.sql")
+        .copied()
+        .collect();
+    apply_migrations(conn, &migrations);
     println!("auth schema created");
 }
 
+/// Apply migrations in filename order, skipping any already recorded.
+fn apply_migrations(conn: &Connection, migrations: &[(&str, &str)]) {
+    ensure_migration_ledger(conn);
+    for (name, sql) in migrations {
+        if migration_applied(conn, name) {
+            continue;
+        }
+        apply_migration(conn, sql, name);
+        // Recorded after the statements succeed: a failed migration must stay
+        // pending so the next run retries it instead of skipping it.
+        if let Err(error) = conn.execute(
+            "INSERT INTO SCHEMA_MIGRATIONS (NAME) VALUES (?1)",
+            params![name],
+        ) {
+            panic!("cannot record migration {name}: {error}");
+        }
+    }
+}
+
+fn ensure_migration_ledger(conn: &Connection) {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS SCHEMA_MIGRATIONS (
+             NAME       TEXT NOT NULL,
+             APPLIED_AT TEXT DEFAULT (datetime('now')) NOT NULL,
+             CONSTRAINT PK_SCHEMA_MIGRATIONS PRIMARY KEY (NAME)
+         )",
+    )
+    .unwrap_or_else(|error| panic!("cannot create migration ledger: {error}"));
+}
+
+fn migration_applied(conn: &Connection, name: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM SCHEMA_MIGRATIONS WHERE NAME = ?1",
+        params![name],
+        |row| row.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
+}
+
 pub fn drop_schema(conn: &Connection) {
+    // SCHEMA_MIGRATIONS goes last: while it exists the ledger claims the
+    // schema is current, so it must not outlive the tables it describes.
     for table in [
         "EMAIL_VERIFICATIONS",
         "SESSIONS",
@@ -154,6 +252,7 @@ pub fn drop_schema(conn: &Connection) {
         "ORDERS",
         "CONTRACTS",
         "ACCOUNTS",
+        "SCHEMA_MIGRATIONS",
     ] {
         let sql = format!("DROP TABLE IF EXISTS {table}");
         match conn.execute_batch(&sql) {
@@ -207,7 +306,7 @@ pub fn list_accounts(conn: &Connection) -> Vec<Account> {
             "SELECT ACCOUNT_ID, ACCOUNT_TYPE, CURRENCY, STATUS FROM ACCOUNTS ORDER BY ACCOUNT_ID",
         )
         .expect("prepare failed");
-    stmt.query_map([], |r| {
+    collect_rows(&mut stmt, [], |r| {
         Ok(Account {
             account_id: r.get(0)?,
             account_type: r.get(1)?,
@@ -215,9 +314,6 @@ pub fn list_accounts(conn: &Connection) -> Vec<Account> {
             status: r.get(3)?,
         })
     })
-    .expect("query failed")
-    .map(|row| row.expect("row error"))
-    .collect()
 }
 
 /// Fetch a single account by ID instead of scanning the whole table.
@@ -267,7 +363,7 @@ pub fn list_contracts(conn: &Connection) -> Vec<Contract> {
     let mut stmt = conn
         .prepare("SELECT CONID, SYMBOL, SEC_TYPE, EXCHANGE, CURRENCY FROM CONTRACTS ORDER BY CONID")
         .expect("prepare failed");
-    stmt.query_map([], |r| {
+    collect_rows(&mut stmt, [], |r| {
         Ok(Contract {
             conid: r.get(0)?,
             symbol: r.get(1)?,
@@ -276,9 +372,6 @@ pub fn list_contracts(conn: &Connection) -> Vec<Contract> {
             currency: r.get(4)?,
         })
     })
-    .expect("query failed")
-    .map(|row| row.expect("row error"))
-    .collect()
 }
 
 pub fn validate_order(o: &NewOrder) -> Result<(), String> {
@@ -383,22 +476,13 @@ pub fn list_account_orders(
     account_id: &str,
     status: Option<&str>,
 ) -> Vec<Order> {
-    let sql = match status {
-        Some(_) => {
-            format!("{ORDER_SELECT} WHERE ACCOUNT_ID = ?1 AND STATUS = ?2 ORDER BY ORDER_ID")
-        }
-        None => format!("{ORDER_SELECT} WHERE ACCOUNT_ID = ?1 ORDER BY ORDER_ID"),
-    };
-    let mut stmt = conn.prepare(&sql).expect("prepare failed");
-    let status_param = status.map(str::to_owned);
-    let args: Vec<&dyn rusqlite::ToSql> = match status_param.as_ref() {
-        Some(value) => vec![&account_id, value],
-        None => vec![&account_id],
-    };
-    stmt.query_map(args.as_slice(), map_order)
-        .expect("query failed")
-        .map(|row| row.expect("row error"))
-        .collect()
+    let mut stmt = conn
+        .prepare(&format!(
+            "{ORDER_SELECT} WHERE ACCOUNT_ID = ?1 \
+             AND (?2 IS NULL OR STATUS = ?2) ORDER BY ORDER_ID"
+        ))
+        .expect("prepare failed");
+    collect_rows(&mut stmt, params![account_id, status], map_order)
 }
 
 pub fn list_fills(conn: &Connection, account_id: &str) -> Vec<Fill> {
@@ -408,7 +492,7 @@ pub fn list_fills(conn: &Connection, account_id: &str) -> Vec<Fill> {
              FROM FILLS WHERE ACCOUNT_ID = ?1 ORDER BY EXEC_TIME DESC",
         )
         .expect("prepare failed");
-    stmt.query_map(params![account_id], |r| {
+    collect_rows(&mut stmt, [account_id], |r| {
         Ok(Fill {
             exec_id: r.get(0)?,
             order_id: r.get(1)?,
@@ -419,29 +503,18 @@ pub fn list_fills(conn: &Connection, account_id: &str) -> Vec<Fill> {
             price: decimal_at(r, 6),
         })
     })
-    .expect("query failed")
-    .map(|row| row.expect("row error"))
-    .collect()
 }
 
 const ORDER_SELECT: &str = "SELECT ORDER_ID, PERM_ID, ACCOUNT_ID, CONID, SIDE, ORDER_TYPE, \
      TOTAL_QUANTITY, FILLED_QUANTITY, LMT_PRICE, AUX_PRICE, STATUS FROM ORDERS";
 
 pub fn list_orders(conn: &Connection, status: Option<&str>) -> Vec<Order> {
-    let sql = match status {
-        Some(_) => format!("{ORDER_SELECT} WHERE STATUS = ?1 ORDER BY ORDER_ID"),
-        None => format!("{ORDER_SELECT} ORDER BY ORDER_ID"),
-    };
-    let mut stmt = conn.prepare(&sql).expect("prepare failed");
-    let status_param = status.map(str::to_owned);
-    let args: Vec<&dyn rusqlite::ToSql> = status_param
-        .as_ref()
-        .map(|value| vec![value as &dyn rusqlite::ToSql])
-        .unwrap_or_default();
-    stmt.query_map(args.as_slice(), map_order)
-        .expect("query failed")
-        .map(|row| row.expect("row error"))
-        .collect()
+    let mut stmt = conn
+        .prepare(&format!(
+            "{ORDER_SELECT} WHERE (?1 IS NULL OR STATUS = ?1) ORDER BY ORDER_ID"
+        ))
+        .expect("prepare failed");
+    collect_rows(&mut stmt, params![status], map_order)
 }
 
 pub fn cancel_order(conn: &Connection, order_id: i64, account_id: &str) -> Result<(), String> {
@@ -689,23 +762,13 @@ pub fn set_cash(
 }
 
 pub fn list_positions(conn: &Connection, account_id: Option<&str>) -> Vec<Position> {
-    let sql = match account_id {
-        Some(_) => {
+    let mut stmt = conn
+        .prepare(
             "SELECT ACCOUNT_ID, CONID, POSITION, AVG_COST FROM POSITIONS \
-                    WHERE ACCOUNT_ID = ?1 ORDER BY CONID"
-        }
-        None => {
-            "SELECT ACCOUNT_ID, CONID, POSITION, AVG_COST FROM POSITIONS \
-                 ORDER BY ACCOUNT_ID, CONID"
-        }
-    };
-    let mut stmt = conn.prepare(sql).expect("prepare failed");
-    let account_param = account_id.map(str::to_owned);
-    let args: Vec<&dyn rusqlite::ToSql> = account_param
-        .as_ref()
-        .map(|value| vec![value as &dyn rusqlite::ToSql])
-        .unwrap_or_default();
-    stmt.query_map(args.as_slice(), |r| {
+             WHERE (?1 IS NULL OR ACCOUNT_ID = ?1) ORDER BY ACCOUNT_ID, CONID",
+        )
+        .expect("prepare failed");
+    collect_rows(&mut stmt, [account_id], |r| {
         Ok(Position {
             account_id: r.get(0)?,
             conid: r.get(1)?,
@@ -713,43 +776,28 @@ pub fn list_positions(conn: &Connection, account_id: Option<&str>) -> Vec<Positi
             avg_cost: optional_decimal_at(r, 3),
         })
     })
-    .expect("query failed")
-    .map(|row| row.expect("row error"))
-    .collect()
 }
 
 pub fn list_cash(conn: &Connection, account_id: Option<&str>) -> Vec<CashBalance> {
-    let sql = match account_id {
-        Some(_) => {
+    let mut stmt = conn
+        .prepare(
             "SELECT ACCOUNT_ID, CURRENCY, CASH FROM CASH_BALANCES \
-                    WHERE ACCOUNT_ID = ?1 ORDER BY CURRENCY"
-        }
-        None => {
-            "SELECT ACCOUNT_ID, CURRENCY, CASH FROM CASH_BALANCES \
-                 ORDER BY ACCOUNT_ID, CURRENCY"
-        }
-    };
-    let mut stmt = conn.prepare(sql).expect("prepare failed");
-    let account_param = account_id.map(str::to_owned);
-    let args: Vec<&dyn rusqlite::ToSql> = account_param
-        .as_ref()
-        .map(|value| vec![value as &dyn rusqlite::ToSql])
-        .unwrap_or_default();
-    stmt.query_map(args.as_slice(), |r| {
+             WHERE (?1 IS NULL OR ACCOUNT_ID = ?1) ORDER BY ACCOUNT_ID, CURRENCY",
+        )
+        .expect("prepare failed");
+    collect_rows(&mut stmt, [account_id], |r| {
         Ok(CashBalance {
             account_id: r.get(0)?,
             currency: r.get(1)?,
             cash: decimal_at(r, 2),
         })
     })
-    .expect("query failed")
-    .map(|row| row.expect("row error"))
-    .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::purge_expired;
     use std::str::FromStr;
 
     #[test]
@@ -775,6 +823,115 @@ mod tests {
         let account_id = user_account_id("9eab5226-3a10-42a8-aed1-5aea54b8b5d3");
         assert_eq!(account_id, "SIM9eab52263a104");
         assert_eq!(account_id.len(), 16);
+    }
+
+    #[test]
+    fn migration_statements_survive_quotes_and_comments() {
+        // A naive `;` split corrupts both of these; the parser must not.
+        let statements = split_statements(
+            "-- leading comment; with a semicolon\n\
+             CREATE TABLE T (A TEXT DEFAULT 'x;y');\n\
+             -- trailing comment\n\
+             CREATE INDEX IX_T ON T (A);\n",
+        );
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("'x;y'"));
+        assert!(statements[1].contains("IX_T"));
+    }
+
+    #[test]
+    fn init_schema_is_idempotent_and_records_a_ledger() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        init_schema(&conn);
+        let applied: i64 = conn
+            .query_row("SELECT COUNT(*) FROM SCHEMA_MIGRATIONS", [], |row| {
+                row.get(0)
+            })
+            .expect("ledger query");
+        assert_eq!(applied as usize, MIGRATIONS.len());
+
+        // Re-running must neither fail nor re-execute: an existing deployment
+        // calls `init-db` on a database created before the ledger existed.
+        init_schema(&conn);
+        let after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM SCHEMA_MIGRATIONS", [], |row| {
+                row.get(0)
+            })
+            .expect("ledger query");
+        assert_eq!(after, applied);
+    }
+
+    #[test]
+    fn init_auth_schema_adds_login_tables_without_dropping_trading_data() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        init_schema(&conn);
+        add_account(&conn, "U1", "MARGIN");
+        set_cash(&conn, "U1", "USD", Decimal::from_str("500").unwrap()).unwrap();
+        // Simulate a pre-ledger database: the trading tables exist but are
+        // not recorded, which is exactly the state of deployed installs.
+        conn.execute("DELETE FROM SCHEMA_MIGRATIONS", [])
+            .expect("clear ledger");
+        conn.execute_batch("DROP TABLE IF EXISTS SESSIONS")
+            .expect("drop sessions");
+
+        init_auth_schema(&conn);
+        let user_table: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='USERS'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("users table");
+        assert_eq!(user_table, 1);
+        let cash = list_cash(&conn, Some("U1"));
+        assert_eq!(cash[0].cash, Decimal::from_str("500").unwrap());
+    }
+
+    #[test]
+    fn expired_session_and_verification_rows_are_pruned() {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        init_schema(&conn);
+        conn.execute(
+            "INSERT INTO USERS (USER_ID, EMAIL, PASSWORD_HASH) VALUES ('u1','a@b.com','x')",
+            [],
+        )
+        .expect("insert user");
+        for (sql, args) in [
+            (
+                "INSERT INTO SESSIONS (SESSION_ID, USER_ID, TOKEN_HASH, EXPIRES_AT) \
+                 VALUES (?1,'u1',?2,?3)",
+                vec!["fresh", "hash-fresh", "datetime('now', '+1 day')"],
+            ),
+            (
+                "INSERT INTO SESSIONS (SESSION_ID, USER_ID, TOKEN_HASH, EXPIRES_AT) \
+                 VALUES ('stale','u1','hash-stale', datetime('now', '-1 day'))",
+                vec![],
+            ),
+            (
+                "INSERT INTO EMAIL_VERIFICATIONS (VERIFICATION_ID, USER_ID, TOKEN_HASH, EXPIRES_AT) \
+                 VALUES ('v-stale','u1','vhash-stale', datetime('now', '-1 day'))",
+                vec![],
+            ),
+        ] {
+            if args.is_empty() {
+                conn.execute(sql, []).expect("insert expired row");
+            } else {
+                conn.execute(sql, rusqlite::params_from_iter(args)).expect("insert row");
+            }
+        }
+
+        purge_expired(&conn);
+
+        let sessions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM SESSIONS", [], |row| row.get(0))
+            .expect("count sessions");
+        assert_eq!(sessions, 1, "only the unexpired session should survive");
+        let verifications: i64 = conn
+            .query_row("SELECT COUNT(*) FROM EMAIL_VERIFICATIONS", [], |row| {
+                row.get(0)
+            })
+            .expect("count verifications");
+        assert_eq!(verifications, 0);
     }
 
     #[test]

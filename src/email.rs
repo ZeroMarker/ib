@@ -11,9 +11,34 @@
 //!   e.g. `https://ibkr.20070809.xyz`. Defaults to
 //!   `http://127.0.0.1:8081`.
 
+use reqwest::Client;
 use std::env;
+use std::time::Duration;
 
 const RESEND_ENDPOINT: &str = "https://api.resend.com/emails";
+
+/// A hung or black-holing Resend endpoint must not pin the request forever,
+/// so every send is bounded. Registration and resend are user-facing, hence
+/// the short connect budget and the longer overall request budget.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// One shared client for the process.
+///
+/// Building a `Client` per send meant a fresh connection pool, a fresh TLS
+/// session and a fresh root-certificate load for every verification email.
+/// The client also owns the timeouts, so they cannot be forgotten at a call
+/// site.
+fn client() -> &'static Client {
+    static CLIENT: std::sync::LazyLock<Client> = std::sync::LazyLock::new(|| {
+        Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("valid static reqwest client configuration")
+    });
+    &CLIENT
+}
 
 fn api_key() -> Option<String> {
     env::var("RESEND_API_KEY")
@@ -79,8 +104,7 @@ pub async fn send_verification(to: &str, token: &str) -> Result<(), String> {
         "html": verification_html(&link, token),
         "text": verification_text(&link, token),
     });
-    let client = reqwest::Client::new();
-    let response = client
+    let response = client()
         .post(RESEND_ENDPOINT)
         .bearer_auth(key)
         .json(&payload)
@@ -116,6 +140,15 @@ mod tests {
             Some(value) => env::set_var("APP_BASE_URL", value),
             None => env::remove_var("APP_BASE_URL"),
         }
+    }
+
+    #[test]
+    fn verification_sender_reuses_a_single_client() {
+        // Building a client per send would leak a connection pool and reload
+        // the root store on every registration; the LazyLock must be shared.
+        let first = client() as *const Client as usize;
+        let second = client() as *const Client as usize;
+        assert_eq!(first, second, "the Resend client must be a singleton");
     }
 
     #[test]

@@ -49,6 +49,28 @@ cargo build --release
 
 无需安装任何数据库客户端：SQLite 以 `bundled` 特性静态编译进二进制，直接读写本地文件。
 
+## 质量门禁
+
+后端：
+
+```bash
+cargo fmt --all --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --lib          # 单元测试
+cargo test --test api     # 端到端测试（真实 HTTP + 临时 SQLite 库）
+```
+
+前端：
+
+```bash
+cd frontend
+npm ci
+npm run check             # 格式 + ESLint + Vitest
+npm run build             # tsc -b && vite build
+```
+
+`.github/workflows/ci.yml` 在每次 push 和 PR 上执行以上全部检查。注意后端通过 `include_str!` 嵌入 `frontend/dist`，所以编译后端前需要先执行前端构建。
+
 ## 数据库连接
 
 ```bash
@@ -58,6 +80,8 @@ export DB_PATH=/var/lib/ib/ib.sqlite3
 CLI 默认 `DB_PATH=./ib.sqlite3`（当前目录）；服务单元通过 `StateDirectory=ib` 使用 `/var/lib/ib/ib.sqlite3`（沙箱下可写，`ProtectHome=read-only` 不受影响）。父目录不存在会自动创建，首次使用前执行 `ib init-db` 建表。数据库以 WAL 模式打开，并启用 `foreign_keys` 外键约束。
 
 `ib serve` 使用单连接池（`Mutex<Connection>`）：SQLite 同一时刻只有一个写者，请求级持锁同时串行化了订单号分配。`/api/health` 会实际执行数据库探活查询，数据库不可用时返回 HTTP 503。
+
+数据库结构由 `migrations/*.sql` 定义，并在 `SCHEMA_MIGRATIONS` 表记录已应用的迁移。`ib init-db` 幂等：已应用的迁移会跳过，历史库（没有账本）也可以安全重复执行。收到 SIGINT/SIGTERM 时服务先排空连接再退出，避免丢弃进行中的账本写入。
 
 ## 模拟交易示例
 

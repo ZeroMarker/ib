@@ -1,5 +1,5 @@
 use crate::db::{Connection, Pool};
-use crate::web;
+use crate::http::{run_db, ApiError, ApiResult};
 use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
     Argon2,
@@ -8,22 +8,20 @@ use axum::{
     extract::{Json, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post},
-    Router,
 };
 use rand_core::OsRng;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 use uuid::Uuid;
 
 const SESSION_COOKIE: &str = "ib_session";
 const SESSION_MAX_AGE: i64 = 30 * 24 * 60 * 60;
 
 #[derive(Clone)]
-pub(crate) struct AppState {
-    pub(crate) db: Arc<Pool>,
+pub struct AppState {
+    pub db: Arc<Pool>,
 }
 
 pub(crate) struct CurrentUser {
@@ -33,81 +31,63 @@ pub(crate) struct CurrentUser {
 }
 
 #[derive(Debug, Deserialize)]
-struct AuthRequest {
+pub struct AuthRequest {
     email: String,
     password: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct VerifyRequest {
+pub struct VerifyRequest {
     token: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct ResendRequest {
+pub struct ResendRequest {
     email: String,
 }
 
 #[derive(Debug, Serialize)]
-struct UserResponse {
+pub struct UserResponse {
     user_id: String,
     email: String,
     email_verified: bool,
 }
 
 #[derive(Debug, Serialize)]
-struct MessageResponse {
+pub struct MessageResponse {
     message: &'static str,
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    error: &'static str,
-}
+/// Resolve on SIGINT (Ctrl-C) or SIGTERM (systemd), whichever arrives first.
+pub(crate) async fn shutdown_signal() {
+    let interrupt = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            eprintln!("ib: cannot install Ctrl-C handler: {error}");
+        }
+    };
 
-pub async fn serve(pool: Pool, address: &str) {
-    let address: SocketAddr = address
-        .parse()
-        .unwrap_or_else(|_| panic!("invalid server address: {address}"));
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .unwrap_or_else(|e| panic!("cannot bind {address}: {e}"));
-    let state = AppState { db: Arc::new(pool) };
-    let app = Router::new()
-        .route("/", get(web::index))
-        .route("/login", get(web::index))
-        .route("/register", get(web::index))
-        .route("/assets/index.css", get(web::styles))
-        .route("/assets/app.js", get(web::app_js))
-        .route("/manifest.webmanifest", get(web::manifest))
-        .route("/sw.js", get(web::service_worker))
-        .route("/icons/icon-192.png", get(web::icon_192))
-        .route("/icons/icon-512.png", get(web::icon_512))
-        .route("/icons/icon.svg", get(web::icon_svg))
-        .route("/api/health", get(health))
-        .route("/api/auth/register", post(register))
-        .route("/api/auth/verify", post(verify))
-        .route("/api/auth/resend-verification", post(resend_verification))
-        .route("/api/auth/login", post(login))
-        .route("/api/auth/logout", post(logout))
-        .route("/api/auth/me", get(me))
-        .merge(crate::trading::router())
-        .with_state(state);
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(error) => {
+                // Without the handler the default action already terminates
+                // the process, so just wait forever and let the signal land.
+                eprintln!("ib: cannot install SIGTERM handler: {error}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
 
-    println!("simulation auth API listening on http://{address}");
-    axum::serve(listener, app)
-        .await
-        .unwrap_or_else(|e| panic!("HTTP server failed: {e}"));
-}
-
-async fn run_db<F>(state: AppState, task: F) -> Response
-where
-    F: FnOnce(&Pool) -> Response + Send + 'static,
-{
-    match tokio::task::spawn_blocking(move || task(&state.db)).await {
-        Ok(response) => response,
-        Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
+    tokio::select! {
+        _ = interrupt => {}
+        _ = terminate => {}
     }
+    println!("received shutdown signal, draining connections");
 }
 
 /// Precomputed Argon2 hash used to equalize login timing for unknown emails,
@@ -119,31 +99,33 @@ fn dummy_password_hash() -> &'static String {
     &DUMMY_HASH
 }
 
-async fn health(State(state): State<AppState>) -> Response {
+pub(crate) async fn health(State(state): State<AppState>) -> Response {
     run_db(state, |pool| {
-        let alive = pool
-            .get()
-            .and_then(|conn| {
-                conn.query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
-                    .map_err(|_| "database unavailable".to_string())
-            })
-            .is_ok_and(|value| value == 1);
+        let alive = match pool.get() {
+            Ok(conn) => conn
+                .query_row("SELECT 1", [], |row| row.get::<_, i64>(0))
+                .is_ok_and(|value| value == 1),
+            Err(_) => false,
+        };
         if alive {
-            Json(MessageResponse { message: "ok" }).into_response()
+            Ok(Json(MessageResponse { message: "ok" }).into_response())
         } else {
-            error(StatusCode::SERVICE_UNAVAILABLE, "database unavailable")
+            Err(ApiError::Unavailable("database unavailable"))
         }
     })
     .await
 }
 
-async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest>) -> Response {
+pub(crate) async fn register(
+    State(state): State<AppState>,
+    Json(request): Json<AuthRequest>,
+) -> Response {
     let email = match normalize_email(&request.email) {
         Ok(email) => email,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        Err(message) => return ApiError::Invalid(message.to_owned()).into_response(),
     };
     if let Err(message) = validate_password(&request.password) {
-        return error(StatusCode::BAD_REQUEST, message);
+        return ApiError::Invalid(message.to_owned()).into_response();
     }
 
     // Blocking DB work stays off Tokio workers; the Resend HTTP send
@@ -155,9 +137,9 @@ async fn register(State(state): State<AppState>, Json(request): Json<AuthRequest
             .await
         {
             Ok(Ok(outcome)) => outcome,
-            Ok(Err(response)) => return response,
+            Ok(Err(api_error)) => return api_error.into_response(),
             Err(_) => {
-                return error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error");
+                return ApiError::Internal("internal server error").into_response();
             }
         }
     };
@@ -185,34 +167,17 @@ struct RegisterOutcome {
     verify_token: String,
 }
 
-
-fn register_in_db(pool: &Pool, email: &str, password: &str) -> Result<RegisterOutcome, Response> {
+fn register_in_db(pool: &Pool, email: &str, password: &str) -> ApiResult<RegisterOutcome> {
     // Argon2 hashing costs tens of milliseconds; this runs in spawn_blocking.
-    let password_hash = match hash_password(password) {
-        Ok(hash) => hash,
-        Err(_) => {
-            return Err(error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create account",
-            ));
-        }
-    };
+    let password_hash =
+        hash_password(password).map_err(|_| ApiError::Internal("could not create account"))?;
     let user_id = Uuid::new_v4().to_string();
-    let conn = match pool.get() {
-        Ok(conn) => conn,
-        Err(_) => {
-            return Err(error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "database unavailable",
-            ));
-        }
-    };
+    let conn = pool
+        .get()
+        .map_err(|_| ApiError::Unavailable("database unavailable"))?;
 
     if conn.execute_batch("BEGIN IMMEDIATE").is_err() {
-        return Err(error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "database unavailable",
-        ));
+        return Err(ApiError::Unavailable("database unavailable"));
     }
     // A single INSERT lets the unique EMAIL index settle concurrent
     // registrations; no check-then-insert race window remains.
@@ -222,9 +187,9 @@ fn register_in_db(pool: &Pool, email: &str, password: &str) -> Result<RegisterOu
     ) {
         let _ = conn.execute_batch("ROLLBACK");
         return Err(if is_unique_violation(&insert_error) {
-            error(StatusCode::CONFLICT, "email is already registered")
+            ApiError::Conflict("email is already registered")
         } else {
-            error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable")
+            ApiError::Unavailable("database unavailable")
         });
     }
 
@@ -233,18 +198,12 @@ fn register_in_db(pool: &Pool, email: &str, password: &str) -> Result<RegisterOu
         Ok(token) => token,
         Err(_) => {
             let _ = conn.execute_batch("ROLLBACK");
-            return Err(error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "could not create verification email",
-            ));
+            return Err(ApiError::Internal("could not create verification email"));
         }
     };
     if conn.execute_batch("COMMIT").is_err() {
         let _ = conn.execute_batch("ROLLBACK");
-        return Err(error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "database unavailable",
-        ));
+        return Err(ApiError::Unavailable("database unavailable"));
     }
 
     Ok(RegisterOutcome {
@@ -258,102 +217,95 @@ fn register_in_db(pool: &Pool, email: &str, password: &str) -> Result<RegisterOu
     })
 }
 
-async fn verify(State(state): State<AppState>, Json(request): Json<VerifyRequest>) -> Response {
+pub(crate) async fn verify(
+    State(state): State<AppState>,
+    Json(request): Json<VerifyRequest>,
+) -> Response {
     let token = request.token.trim().to_owned();
     if token.is_empty() {
-        return error(StatusCode::BAD_REQUEST, "verification token is required");
+        return ApiError::Invalid("verification token is required".into()).into_response();
     }
     run_db(state, move |pool| {
-        let conn = match pool.get() {
-            Ok(conn) => conn,
-            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-        };
+        let conn = pool
+            .get()
+            .map_err(|_| ApiError::Unavailable("database unavailable"))?;
         ensure_verification_table(&conn);
         let token_hash = hash_token(&token);
-        let (user_id, expired): (String, bool) = match conn.query_row(
-            "SELECT USER_ID, EXPIRES_AT <= datetime('now') FROM EMAIL_VERIFICATIONS \
-             WHERE TOKEN_HASH = ?1",
-            params![token_hash],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        ) {
-            Ok(found) => found,
-            Err(_) => return error(StatusCode::BAD_REQUEST, "invalid verification token"),
-        };
+        let (user_id, expired): (String, bool) = conn
+            .query_row(
+                "SELECT USER_ID, EXPIRES_AT <= datetime('now') FROM EMAIL_VERIFICATIONS \
+                 WHERE TOKEN_HASH = ?1",
+                params![token_hash],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|_| ApiError::Invalid("invalid verification token".into()))?;
         if expired {
             let _ = conn.execute(
                 "DELETE FROM EMAIL_VERIFICATIONS WHERE TOKEN_HASH = ?1",
                 params![token_hash],
             );
-            return error(StatusCode::GONE, "verification token has expired");
+            return Err(ApiError::Gone("verification token has expired"));
         }
-        if conn
-            .execute(
-                "UPDATE USERS SET EMAIL_VERIFIED = 1 WHERE USER_ID = ?1",
-                params![user_id.as_str()],
-            )
-            .is_err()
-        {
-            return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable");
-        }
+        conn.execute(
+            "UPDATE USERS SET EMAIL_VERIFIED = 1 WHERE USER_ID = ?1",
+            params![user_id.as_str()],
+        )
+        .map_err(|_| ApiError::Unavailable("database unavailable"))?;
+        // Single use: burn every outstanding token, not just this one.
         let _ = conn.execute(
             "DELETE FROM EMAIL_VERIFICATIONS WHERE USER_ID = ?1",
             params![user_id.as_str()],
         );
-        match conn.query_row(
-            "SELECT USER_ID, EMAIL FROM USERS WHERE USER_ID = ?1",
-            params![user_id.as_str()],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ) {
-            Ok((user_id, email)) => Json(UserResponse {
-                user_id,
-                email,
-                email_verified: true,
-            })
-            .into_response(),
-            Err(_) => error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-        }
+        let (user_id, email) = conn
+            .query_row(
+                "SELECT USER_ID, EMAIL FROM USERS WHERE USER_ID = ?1",
+                params![user_id.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .map_err(|_| ApiError::Unavailable("database unavailable"))?;
+        Ok(Json(UserResponse {
+            user_id,
+            email,
+            email_verified: true,
+        })
+        .into_response())
     })
     .await
 }
 
-async fn resend_verification(
+pub(crate) async fn resend_verification(
     State(state): State<AppState>,
     Json(request): Json<ResendRequest>,
 ) -> Response {
     let email = match normalize_email(&request.email) {
         Ok(email) => email,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        Err(message) => return ApiError::Invalid(message.to_owned()).into_response(),
     };
     let minted = {
         let state = state.clone();
         match tokio::task::spawn_blocking(move || mint_verification_token(&state.db, &email)).await
         {
             Ok(minted) => minted,
-            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "internal server error"),
+            Err(_) => return ApiError::Internal("internal server error").into_response(),
         }
     };
-    // Never reveal whether an address is registered: unknown emails and
-    // already-verified accounts get the same generic success.
+    // Never reveal whether an address is registered. Unknown emails, already
+    // verified accounts, an unconfigured mailer and a provider failure must
+    // all look identical to the caller, otherwise the endpoint becomes an
+    // account-enumeration oracle (a 503 for "known but unconfigured" versus
+    // 200 for "unknown" is exactly such an oracle).
     let (email, token) = match minted {
         Some(pair) => pair,
         None => return Json(MessageResponse { message: "ok" }).into_response(),
     };
     if !crate::email::is_configured() {
-        return error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "verification email is not configured",
-        );
+        eprintln!("resend skipped for {email}: verification email is not configured");
+        return Json(MessageResponse { message: "ok" }).into_response();
     }
-    match crate::email::send_verification(&email, &token).await {
-        Ok(()) => Json(MessageResponse { message: "ok" }).into_response(),
-        Err(send_error) => {
-            eprintln!("resend verification email failed for {email}: {send_error}");
-            error(
-                StatusCode::BAD_GATEWAY,
-                "could not send verification email",
-            )
-        }
+    if let Err(send_error) = crate::email::send_verification(&email, &token).await {
+        eprintln!("resend verification email failed for {email}: {send_error}");
     }
+    Json(MessageResponse { message: "ok" }).into_response()
 }
 
 /// Mint a fresh verification token for an unverified user.
@@ -412,65 +364,88 @@ fn store_verification_token(conn: &Connection, user_id: &str) -> Result<String, 
     Ok(token)
 }
 
-async fn login(State(state): State<AppState>, Json(request): Json<AuthRequest>) -> Response {
+pub(crate) async fn login(
+    State(state): State<AppState>,
+    Json(request): Json<AuthRequest>,
+) -> Response {
     let email = match normalize_email(&request.email) {
         Ok(email) => email,
-        Err(message) => return error(StatusCode::BAD_REQUEST, message),
+        Err(message) => return ApiError::Invalid(message.to_owned()).into_response(),
     };
 
     run_db(state, move |pool| {
-        let conn = match pool.get() {
-            Ok(conn) => conn,
-            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-        };
-        let (user_id, password_hash, verified): (String, String, i64) = match conn.query_row(
-            "SELECT USER_ID, PASSWORD_HASH, EMAIL_VERIFIED FROM USERS \
-             WHERE EMAIL = ?1 AND STATUS = 'ACTIVE'",
-            params![email.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ) {
-            Ok(row) => row,
-            // Burn an Argon2 verification so unknown-email responses take the
-            // same time as wrong-password ones.
-            Err(_) => {
-                verify_password(&request.password, dummy_password_hash());
-                return error(StatusCode::UNAUTHORIZED, "invalid email or password");
-            }
-        };
-        if !verify_password(&request.password, &password_hash) {
-            return error(StatusCode::UNAUTHORIZED, "invalid email or password");
-        }
+        let conn = pool
+            .get()
+            .map_err(|_| ApiError::Unavailable("database unavailable"))?;
+        // Login is what grows SESSIONS, so it is also where expired rows get
+        // reclaimed; see migration 004 for the supporting indexes.
+        purge_expired(&conn);
+        let row: (String, String, i64) = conn
+            .query_row(
+                "SELECT USER_ID, PASSWORD_HASH, EMAIL_VERIFIED FROM USERS \
+                 WHERE EMAIL = ?1 AND STATUS = 'ACTIVE'",
+                params![email.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .map_or_else(
+                |_| {
+                    // Burn an Argon2 verification so unknown-email responses
+                    // take the same time as wrong-password ones.
+                    verify_password(&request.password, dummy_password_hash());
+                    Err(ApiError::Unauthenticated("invalid email or password"))
+                },
+                |row| {
+                    if !verify_password(&request.password, &row.1) {
+                        return Err(ApiError::Unauthenticated("invalid email or password"));
+                    }
+                    Ok(row)
+                },
+            )?;
+        let (user_id, _password_hash, verified) = row;
         // Verification is enforced only when the server can actually send
         // verification emails; otherwise local/dev logins stay usable and
         // the account remains unverified.
         if verified != 1 && crate::email::is_configured() {
-            return error(
-                StatusCode::FORBIDDEN,
+            return Err(ApiError::Forbidden(
                 "email not verified; check your inbox for the verification email",
-            );
+            ));
         }
 
-        let token = match insert_session(&conn, &user_id) {
-            Ok(token) => token,
-            Err(_) => {
-                return error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "could not create session",
-                )
-            }
-        };
+        let token = insert_session(&conn, &user_id)
+            .map_err(|_| ApiError::Internal("could not create session"))?;
 
         let response = UserResponse {
             user_id,
             email,
             email_verified: verified == 1,
         };
-        with_session_cookie(StatusCode::OK, token, Json(response))
+        Ok(with_session_cookie(StatusCode::OK, token, Json(response)))
     })
     .await
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
+/// Delete rows that can no longer authenticate anyone. Failures are ignored
+/// on purpose: a stale row is harmless, and a cleanup error must never stop
+/// someone from logging in.
+pub(crate) fn purge_expired(conn: &Connection) {
+    ensure_verification_table(conn);
+    for sql in [
+        "DELETE FROM SESSIONS WHERE EXPIRES_AT <= datetime('now')",
+        "DELETE FROM EMAIL_VERIFICATIONS WHERE EXPIRES_AT <= datetime('now')",
+    ] {
+        if let Err(error) = conn.execute(sql, []) {
+            eprintln!("ib: expired-row sweep skipped ({error}): {sql}");
+        }
+    }
+}
+
+pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     run_db(state, move |pool| {
         if let Some(token) = session_token(&headers) {
             if let Ok(conn) = pool.get() {
@@ -483,26 +458,24 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
         }
         let cookie =
             format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0");
-        (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+        Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response())
     })
     .await
 }
 
-async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
+pub(crate) async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     run_db(state, move |pool| {
-        let conn = match pool.get() {
-            Ok(conn) => conn,
-            Err(_) => return error(StatusCode::INTERNAL_SERVER_ERROR, "database unavailable"),
-        };
-        match current_user(&conn, &headers) {
-            Ok(user) => Json(UserResponse {
-                user_id: user.user_id,
-                email: user.email,
-                email_verified: user.email_verified,
-            })
-            .into_response(),
-            Err(status) => error(status, "authentication required"),
-        }
+        let conn = pool
+            .get()
+            .map_err(|_| ApiError::Unavailable("database unavailable"))?;
+        let user = current_user(&conn, &headers)
+            .map_err(|_| ApiError::Unauthenticated("authentication required"))?;
+        Ok(Json(UserResponse {
+            user_id: user.user_id,
+            email: user.email,
+            email_verified: user.email_verified,
+        })
+        .into_response())
     })
     .await
 }
@@ -608,10 +581,6 @@ fn with_session_cookie<T: Serialize>(status: StatusCode, token: String, body: Js
         "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age={SESSION_MAX_AGE}"
     );
     (status, [(header::SET_COOKIE, cookie)], body).into_response()
-}
-
-fn error(status: StatusCode, message: &'static str) -> Response {
-    (status, Json(ErrorResponse { error: message })).into_response()
 }
 
 #[cfg(test)]

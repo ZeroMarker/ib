@@ -1,15 +1,63 @@
-mod auth;
-mod db;
-mod email;
-mod models;
-mod trading;
-mod web;
+//! CLI entry point for the simulation trading platform.
+//!
+//! Command dispatch is a flat `match` over argv; each arm is a thin wrapper
+//! that parses arguments and calls into `db`. Argument access goes through
+//! `Args` so a missing operand prints usage instead of panicking on an
+//! out-of-bounds index.
 
-use models::*;
+use ib::db;
+use ib::models::*;
+use ib::serve;
 use rust_decimal::Decimal;
 use std::env;
 use std::path::PathBuf;
 use std::str::FromStr;
+
+/// Positional command-line arguments with usage-exiting accessors.
+///
+/// The previous dispatch used `args.get(n).unwrap_or_else(|| usage())` and
+/// `args[n]` at roughly 30 sites; centralizing it here keeps the parse
+/// rules in one place and guarantees every operand is bounds-checked.
+struct Args(Vec<String>);
+
+impl Args {
+    fn from_env() -> Self {
+        Self(env::args().skip(1).collect())
+    }
+
+    /// The subcommand keyword, e.g. `order` in `ib order place ...`.
+    fn command(&self) -> &str {
+        self.0.first().map_or_else(|| usage(), String::as_str)
+    }
+
+    fn sub(&self) -> Option<&str> {
+        self.0.get(1).map(String::as_str)
+    }
+
+    fn opt(&self, index: usize) -> Option<&str> {
+        self.0.get(index).map(String::as_str)
+    }
+
+    /// A required operand, or usage plus exit.
+    fn required(&self, index: usize) -> &str {
+        self.opt(index).unwrap_or_else(|| usage())
+    }
+
+    /// A required integer operand, or usage plus exit.
+    fn int(&self, index: usize) -> i64 {
+        self.required(index).parse().unwrap_or_else(|_| usage())
+    }
+
+    /// A required decimal operand, or usage plus exit.
+    fn decimal(&self, index: usize) -> Decimal {
+        decimal_arg(self.required(index))
+    }
+
+    /// An optional decimal operand.
+    fn optional_decimal(&self, index: usize) -> Option<Decimal> {
+        self.opt(index).map(decimal_arg)
+    }
+}
 
 fn usage() -> ! {
     eprintln!(
@@ -58,22 +106,20 @@ fn connect_pool() -> db::Pool {
 
 #[tokio::main]
 async fn main() {
-    let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() {
-        usage();
-    }
-    if args[0] == "serve" {
+    let args = Args::from_env();
+
+    if args.command() == "serve" {
         let addr = args
-            .get(1)
-            .cloned()
+            .opt(1)
+            .map(str::to_owned)
             .or_else(|| env::var("SERVER_ADDR").ok())
             .unwrap_or_else(|| "127.0.0.1:8081".into());
-        auth::serve(connect_pool(), &addr).await;
+        serve(connect_pool(), &addr).await;
         return;
     }
 
     let conn = connect();
-    match args[0].as_str() {
+    match args.command() {
         "ping" => {
             let version: String = conn
                 .query_row("SELECT sqlite_version()", [], |row| row.get(0))
@@ -87,163 +133,157 @@ async fn main() {
         "init-db" => db::init_schema(&conn),
         "init-auth" => db::init_auth_schema(&conn),
         "drop-db" => db::drop_schema(&conn),
-        "account" => match args.get(1).map(String::as_str) {
+        "account" => match args.sub() {
             Some("add") => {
-                let id = args.get(2).unwrap_or_else(|| usage());
-                let typ = args.get(3).cloned().unwrap_or_else(|| "MARGIN".into());
-                db::add_account(&conn, id, &typ);
-                println!("account {} ({}) created", id, typ);
+                let id = args.required(2);
+                let account_type = args.opt(3).unwrap_or("MARGIN");
+                db::add_account(&conn, id, account_type);
+                println!("account {} ({}) created", id, account_type);
             }
             Some("list") => {
-                for a in db::list_accounts(&conn) {
+                for account in db::list_accounts(&conn) {
                     println!(
                         "{} {:8} {} {}",
-                        a.account_id, a.account_type, a.currency, a.status
+                        account.account_id, account.account_type, account.currency, account.status
                     );
                 }
             }
             _ => usage(),
         },
-        "contract" => match args.get(1).map(String::as_str) {
+        "contract" => match args.sub() {
             Some("add") => {
-                let c = Contract {
-                    conid: args
-                        .get(2)
-                        .unwrap_or_else(|| usage())
-                        .parse()
-                        .unwrap_or_else(|_| usage()),
-                    symbol: args.get(3).cloned().unwrap_or_else(|| usage()),
-                    sec_type: args.get(4).cloned().unwrap_or_else(|| "STK".into()),
-                    exchange: args.get(5).cloned().unwrap_or_else(|| "SMART".into()),
-                    currency: args.get(6).cloned().unwrap_or_else(|| "USD".into()),
+                let contract = Contract {
+                    conid: args.int(2),
+                    symbol: args.required(3).to_owned(),
+                    sec_type: args.opt(4).unwrap_or("STK").to_owned(),
+                    exchange: args.opt(5).unwrap_or("SMART").to_owned(),
+                    currency: args.opt(6).unwrap_or("USD").to_owned(),
                 };
-                db::add_contract(&conn, &c)
+                db::add_contract(&conn, &contract)
                     .unwrap_or_else(|error| panic!("contract failed: {error}"));
-                println!("contract {} {} added", c.conid, c.symbol);
+                println!("contract {} {} added", contract.conid, contract.symbol);
             }
             Some("list") => {
-                for c in db::list_contracts(&conn) {
+                for contract in db::list_contracts(&conn) {
                     println!(
                         "{} {:6} {:4} {:8} {}",
-                        c.conid, c.symbol, c.sec_type, c.exchange, c.currency
+                        contract.conid,
+                        contract.symbol,
+                        contract.sec_type,
+                        contract.exchange,
+                        contract.currency
                     );
                 }
             }
             _ => usage(),
         },
-        "order" => match args.get(1).map(String::as_str) {
+        "order" => match args.sub() {
             Some("place") => {
-                if args.len() < 8 {
-                    usage();
-                }
-                let o = NewOrder {
-                    order_id: args[2].parse().unwrap_or_else(|_| usage()),
-                    account_id: args[3].clone(),
-                    conid: args[4].parse().unwrap_or_else(|_| usage()),
-                    side: args[5].to_uppercase(),
-                    order_type: args[6].to_uppercase(),
-                    quantity: decimal_arg(&args[7]),
-                    lmt_price: args.get(8).map(|s| decimal_arg(s)),
-                    aux_price: args.get(9).map(|s| decimal_arg(s)),
+                let order = NewOrder {
+                    order_id: args.int(2),
+                    account_id: args.required(3).to_owned(),
+                    conid: args.int(4),
+                    side: args.required(5).to_uppercase(),
+                    order_type: args.required(6).to_uppercase(),
+                    quantity: args.decimal(7),
+                    lmt_price: args.optional_decimal(8),
+                    aux_price: args.optional_decimal(9),
                 };
-                db::place_order(&conn, &o).unwrap_or_else(|error| panic!("order failed: {error}"));
-                println!("order {} submitted", o.order_id);
+                db::place_order(&conn, &order)
+                    .unwrap_or_else(|error| panic!("order failed: {error}"));
+                println!("order {} submitted", order.order_id);
             }
             Some("list") => {
-                let status = args.get(2).cloned();
-                for o in db::list_orders(&conn, status.as_deref()) {
+                for order in db::list_orders(&conn, args.opt(2)) {
                     println!(
                         "#{} perm={} {} conid={} {:4} {:7} qty={}/{} lmt={:?} aux={:?} {}",
-                        o.order_id,
-                        o.perm_id
+                        order.order_id,
+                        order
+                            .perm_id
                             .map(|p| p.to_string())
                             .unwrap_or_else(|| "-".into()),
-                        o.account_id,
-                        o.conid,
-                        o.side,
-                        o.order_type,
-                        o.total_quantity,
-                        o.filled_quantity,
-                        o.lmt_price,
-                        o.aux_price,
-                        o.status,
+                        order.account_id,
+                        order.conid,
+                        order.side,
+                        order.order_type,
+                        order.total_quantity,
+                        order.filled_quantity,
+                        order.lmt_price,
+                        order.aux_price,
+                        order.status,
                     );
                 }
             }
             Some("cancel") => {
-                let order_id: i64 = args
-                    .get(2)
-                    .unwrap_or_else(|| usage())
-                    .parse()
-                    .unwrap_or_else(|_| usage());
-                let account_id = args.get(3).cloned().unwrap_or_else(|| usage());
-                db::cancel_order(&conn, order_id, &account_id)
+                let order_id = args.int(2);
+                db::cancel_order(&conn, order_id, args.required(3))
                     .unwrap_or_else(|error| panic!("cancel failed: {error}"));
-                println!("order {} cancelled", order_id);
+                println!("order {order_id} cancelled");
             }
             _ => usage(),
         },
-        "fill" => match args.get(1).map(String::as_str) {
+        "fill" => match args.sub() {
             Some("add") => {
-                if args.len() < 5 {
-                    usage();
-                }
-                let f = NewFill {
-                    exec_id: args.get(5).cloned().unwrap_or_else(|| {
-                        format!(
-                            "EX{:016X}",
-                            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
-                        )
-                    }),
-                    order_id: args[2].parse().unwrap_or_else(|_| usage()),
-                    account_id: args[3].clone(),
-                    price: decimal_arg(&args[4]),
+                let fill = NewFill {
+                    exec_id: args
+                        .opt(5)
+                        .map(str::to_owned)
+                        .unwrap_or_else(default_exec_id),
+                    order_id: args.int(2),
+                    account_id: args.required(3).to_owned(),
+                    price: args.decimal(4),
                 };
-                db::record_fill(&conn, &f).unwrap_or_else(|error| panic!("{error}"));
-                println!("fill recorded on order {}", f.order_id);
+                db::record_fill(&conn, &fill).unwrap_or_else(|error| panic!("{error}"));
+                println!("fill recorded on order {}", fill.order_id);
             }
             _ => usage(),
         },
-        "position" => match args.get(1).map(String::as_str) {
+        "position" => match args.sub() {
             Some("set") => {
-                if args.len() < 5 {
-                    usage();
-                }
                 db::set_position(
                     &conn,
-                    &args[2],
-                    args[3].parse().unwrap_or_else(|_| usage()),
-                    decimal_arg(&args[4]),
-                    args.get(5).map(|s| decimal_arg(s)),
+                    args.required(2),
+                    args.int(3),
+                    args.decimal(4),
+                    args.optional_decimal(5),
                 );
                 println!("position updated");
             }
             Some("list") => {
-                for p in db::list_positions(&conn, args.get(2).map(String::as_str)) {
+                for position in db::list_positions(&conn, args.opt(2)) {
                     println!(
                         "{} conid={} pos={} avg_cost={:?}",
-                        p.account_id, p.conid, p.position, p.avg_cost
+                        position.account_id, position.conid, position.position, position.avg_cost
                     );
                 }
             }
             _ => usage(),
         },
-        "cash" => match args.get(1).map(String::as_str) {
+        "cash" => match args.sub() {
             Some("set") => {
-                if args.len() < 5 {
-                    usage();
-                }
-                db::set_cash(&conn, &args[2], &args[3], decimal_arg(&args[4]))
+                db::set_cash(&conn, args.required(2), args.required(3), args.decimal(4))
                     .unwrap_or_else(|error| panic!("cash update failed: {error}"));
                 println!("balance updated");
             }
             Some("list") => {
-                for b in db::list_cash(&conn, args.get(2).map(String::as_str)) {
-                    println!("{} {} {:.2}", b.account_id, b.currency, b.cash);
+                for balance in db::list_cash(&conn, args.opt(2)) {
+                    println!(
+                        "{} {} {:.2}",
+                        balance.account_id, balance.currency, balance.cash
+                    );
                 }
             }
             _ => usage(),
         },
         _ => usage(),
     }
+}
+
+/// Fallback execution ID for `ib fill add` when the caller supplies none.
+/// The 24-byte cap in `db::record_fill` matches the 18 characters produced here.
+fn default_exec_id() -> String {
+    format!(
+        "EX{:016X}",
+        chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )
 }

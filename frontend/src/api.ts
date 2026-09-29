@@ -6,7 +6,7 @@ export class ApiError extends Error {
   }
 }
 
-export const api = async <T,>(path: string, init?: RequestInit): Promise<T> => {
+export const api = async <T>(path: string, init?: RequestInit): Promise<T> => {
   const response = await fetch(`api/${path}`, { credentials: 'same-origin', ...init })
   const data = await response.json().catch(() => undefined)
   if (!response.ok) throw new ApiError(response.status, data?.error ?? '请求失败，请稍后重试。')
