@@ -151,4 +151,163 @@ mod tests {
         assert!(json.contains("\"position\":\"-12.5\""), "{json}");
         assert!(json.contains("\"avg_cost\":\"3\""), "{json}");
     }
+
+    /// The checked-in wire contract, shared with the frontend.
+    const CONTRACT: &str = include_str!("../api-schema.json");
+
+    /// Serialize `value` and return its field names, sorted.
+    ///
+    /// Sorted rather than in declaration order: `serde_json::Value` is backed
+    /// by a `Map` that does not preserve insertion order, and a hand-edited
+    /// JSON object has no meaningful key order either. The set of names is the
+    /// contract; the order is not.
+    fn field_names<T: Serialize>(value: &T) -> Vec<String> {
+        let mut names: Vec<String> = serde_json::to_value(value)
+            .expect("serialize")
+            .as_object()
+            .expect("a struct must serialize to an object")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// The `types` object, which holds every entry. The `"//"` key next to it
+    /// is a comment for humans reading the file and is skipped by addressing
+    /// `types` directly.
+    fn contract() -> serde_json::Map<String, serde_json::Value> {
+        let parsed: serde_json::Value =
+            serde_json::from_str(CONTRACT).expect("api-schema.json must be valid JSON");
+        parsed
+            .get("types")
+            .expect("api-schema.json must have a top-level `types` object")
+            .as_object()
+            .expect("`types` must be an object")
+            .clone()
+    }
+
+    /// Read the expected field list for `name` out of the contract file, sorted
+    /// to match [`field_names`].
+    fn contract_fields(name: &str) -> Vec<String> {
+        let mut names: Vec<String> = contract()
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is missing from api-schema.json"))
+            .as_object()
+            .expect("a contract entry must be an object of field: type")
+            .keys()
+            .cloned()
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn assert_contract(name: &str, actual: Vec<String>) {
+        let expected = contract_fields(name);
+        assert_eq!(
+            actual, expected,
+            "{name} does not match api-schema.json. Update the struct and the contract together, \
+             then update frontend/src/types.ts if the field names changed."
+        );
+    }
+
+    // The overview envelope is serialized in `trading`, not here, so its own
+    // contract is asserted by the integration test that reads the live
+    // endpoint. What matters here is that the model types the frontend imports
+    // still match the contract.
+
+    /// Every serialized struct must match `api-schema.json` field for field.
+    ///
+    /// Without this, adding or renaming a field on the Rust side compiles and
+    /// passes every other test while the frontend's `types.ts` keeps a stale
+    /// view of the payload -- the drift this project already had once
+    /// (`Position`, `Cash` and `Fill` were strict subsets of what the server
+    /// sent). The frontend derives its shapes from the same file, so a mismatch
+    /// now fails here first.
+    #[test]
+    fn the_wire_contract_matches_this_file() {
+        let decimal = Decimal::from_str("1.5").unwrap();
+
+        assert_contract(
+            "Contract",
+            field_names(&Contract {
+                conid: 1,
+                symbol: "AAPL".into(),
+                sec_type: "STK".into(),
+                exchange: "SMART".into(),
+                currency: "USD".into(),
+            }),
+        );
+        assert_contract(
+            "Account",
+            field_names(&Account {
+                account_id: "SIM1".into(),
+                account_type: "MARGIN".into(),
+                currency: "USD".into(),
+                status: "ACTIVE".into(),
+            }),
+        );
+        assert_contract(
+            "Order",
+            field_names(&Order {
+                order_id: 1,
+                perm_id: None,
+                account_id: "SIM1".into(),
+                conid: 2,
+                side: "BUY".into(),
+                order_type: "LMT".into(),
+                total_quantity: decimal,
+                filled_quantity: decimal,
+                lmt_price: Some(decimal),
+                aux_price: None,
+                status: "Submitted".into(),
+            }),
+        );
+        assert_contract(
+            "Position",
+            field_names(&Position {
+                account_id: "SIM1".into(),
+                conid: 1,
+                position: decimal,
+                avg_cost: Some(decimal),
+            }),
+        );
+        assert_contract(
+            "CashBalance",
+            field_names(&CashBalance {
+                account_id: "SIM1".into(),
+                currency: "USD".into(),
+                cash: decimal,
+            }),
+        );
+        assert_contract(
+            "Fill",
+            field_names(&Fill {
+                exec_id: "EX1".into(),
+                order_id: 1,
+                account_id: "SIM1".into(),
+                conid: 2,
+                side: "BUY".into(),
+                quantity: decimal,
+                price: decimal,
+            }),
+        );
+    }
+
+    /// `auth::UserResponse` is a second serialized struct outside this module.
+    #[test]
+    fn the_user_response_matches_the_contract() {
+        let expected = contract_fields("UserResponse");
+        let mut actual: Vec<String> = vec![
+            "user_id".to_string(),
+            "email".to_string(),
+            "email_verified".to_string(),
+        ];
+        actual.sort();
+        assert_eq!(
+            actual, expected,
+            "auth::UserResponse no longer matches api-schema.json. Its fields are private, so \
+             this test asserts the list literally -- if you changed the struct, change both."
+        );
+    }
 }

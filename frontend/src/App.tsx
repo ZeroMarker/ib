@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import Dashboard from './pages/Dashboard'
 import { ApiError, api, json } from './api'
 import type { AuthUser, InstallPrompt } from './types'
+import { ASSET_VERSION } from '../version.json'
 
 export function App() {
   const [user, setUser] = useState<AuthUser | null>(null)
@@ -13,8 +14,11 @@ export function App() {
   const logout = useCallback(() => setUser(null), [])
 
   useEffect(() => {
+    // The `?v=` suffix is what forces a new build to install a new worker;
+    // it comes from the same constant that the worker itself uses, so the two
+    // cannot disagree about which build they describe.
     if ('serviceWorker' in navigator)
-      navigator.serviceWorker.register('./sw.js?v=20260825-ux5').catch(() => {})
+      navigator.serviceWorker.register(`./sw.js?v=${ASSET_VERSION}`).catch(() => {})
     const captureInstall = (event: Event) => {
       event.preventDefault()
       setInstallPrompt(event as InstallPrompt)

@@ -1,0 +1,5 @@
+{
+  "//": "Single source of truth for the service-worker cache version. Bump CACHE_NAME whenever the cached shell changes (the activate handler clears the old one), and bump ASSET_VERSION whenever dist output changes. vite.config.ts and src/App.tsx both read this file, so the two can no longer drift apart.",
+  "CACHE_NAME": "ib-shell-v6",
+  "ASSET_VERSION": "20260930-swver"
+}

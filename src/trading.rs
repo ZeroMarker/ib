@@ -297,6 +297,12 @@ async fn set_cash(
         if currency.len() != 3 || !currency.chars().all(|c| c.is_ascii_alphabetic()) {
             return Err(ApiError::Invalid("currency must be a 3-letter code".into()));
         }
+        // A deposit endpoint must not accept a negative amount. The form in
+        // `useTrading.setCash` already blocks this, but the check belongs to
+        // the server too: the browser check is a convenience, not a control.
+        if amount <= Decimal::ZERO {
+            return Err(ApiError::Invalid("cash amount must be positive".into()));
+        }
         db::set_cash(&conn, &account_id, &currency, amount).map_err(ApiError::Invalid)?;
         Ok(StatusCode::NO_CONTENT.into_response())
     })

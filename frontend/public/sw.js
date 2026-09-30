@@ -1,5 +1,13 @@
-const CACHE_NAME = 'ib-shell-v5'
-const ASSET_VERSION = '20260825-ux5'
+// __ASSET_VERSION__ is substituted at build time by the
+// `versioned-service-worker` plugin in vite.config.ts, which reads
+// version.json. version.json is the single source of truth shared with the
+// `?v=` query strings on the shell assets. Do not hardcode the value here:
+// Vite copies this file verbatim and never resolves an import.
+const ASSET_VERSION = '__ASSET_VERSION__'
+
+// Bump on any change to the cached shell. Cleared on activate.
+const CACHE_NAME = 'ib-shell-v6'
+
 const SHELL = [
   './',
   `./manifest.webmanifest?v=${ASSET_VERSION}`,

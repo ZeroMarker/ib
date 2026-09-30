@@ -8,6 +8,7 @@ import type { Order, Overview } from '../types'
 
 const order = (patch: Partial<Order> = {}): Order => ({
   order_id: 1,
+  perm_id: null,
   account_id: 'SIMabc',
   conid: 1,
   side: 'BUY',
@@ -27,8 +28,8 @@ describe('PositionsPage', () => {
     render(
       <PositionsPage
         positions={[
-          { conid: 1, position: '100', avg_cost: '185.52' },
-          { conid: 2, position: '-50', avg_cost: null },
+          { account_id: 'SIMabc', conid: 1, position: '100', avg_cost: '185.52' },
+          { account_id: 'SIMabc', conid: 2, position: '-50', avg_cost: null },
         ]}
         symbols={new Map([[1, 'AAPL']])}
       />,
@@ -42,7 +43,10 @@ describe('PositionsPage', () => {
 
   it('falls back to the conid when the symbol is unknown', () => {
     render(
-      <PositionsPage positions={[{ conid: 99, position: '1', avg_cost: '2' }]} symbols={symbols} />,
+      <PositionsPage
+        positions={[{ account_id: 'SIMabc', conid: 99, position: '1', avg_cost: '2' }]}
+        symbols={symbols}
+      />,
     )
     expect(screen.getByText('#99')).toBeInTheDocument()
   })
@@ -56,7 +60,15 @@ describe('PositionsPage', () => {
 describe('FillsPage', () => {
   it('lists executions with their order, quantity and price', () => {
     const fills: Overview['fills'] = [
-      { exec_id: 'EX1', order_id: 7, quantity: '100', price: '185.52' },
+      {
+        exec_id: 'EX1',
+        order_id: 7,
+        account_id: 'SIMabc',
+        conid: 1,
+        side: 'BUY',
+        quantity: '100',
+        price: '185.52',
+      },
     ]
     render(<FillsPage fills={fills} />)
     const row = screen.getByText('EX1').closest('tr')!

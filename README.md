@@ -1,171 +1,96 @@
 # ib — 模拟交易平台（Rust + SQLite）
 
-`ib` 是一个面向策略开发和纸上交易的模拟交易平台。它提供账户、合约、订单、模拟成交、持仓和现金账本，用 SQLite 保存状态，用 Rust 提供 CLI 操作入口。
+`ib` 是一个面向策略开发和纸上交易的模拟交易平台。它提供账户、合约、订单、模拟成交、
+持仓和现金账本，用 SQLite 保存状态，用 Rust 提供 CLI 与 HTTP 服务，前端由同一个二进制提供。
 
-项目定位是模拟交易和交易账务演练，不是券商客户端：不会连接 Interactive Brokers 下单，也不会把任何订单发送到真实市场。当前的撮合入口是 `fill add`，由测试程序或策略适配器注入成交价；后续可以在此基础上接入行情、撮合规则、风控和回测时钟。
+**项目定位是模拟交易和交易账务演练，不是券商客户端**：不会连接 Interactive Brokers 下单，
+也不会把任何订单发送到真实市场。唯一的外部依赖是可选的 Resend，仅用于发送邮箱验证邮件。
 
 ## 能力边界
 
 | 能力 | 当前支持 |
 | --- | --- |
-| 账户与合约 | 创建、查询账户和交易合约 |
-| 模拟订单 | MKT/LMT/STP/STP_LMT，BUY/SELL，订单状态管理 |
-| 模拟成交 | 按订单剩余数量注入一次完整成交 |
+| 账户与合约 | 创建、查询模拟账户和交易合约 |
+| 模拟订单 | MKT/LMT/STP/STP_LMT，BUY/SELL，状态管理、按账户分配订单号 |
+| 模拟成交 | 按订单剩余数量注入一次完整成交，`EXEC_ID` 幂等 |
 | 持仓账本 | 多空方向、平均成本、合约乘数 |
 | 现金账本 | 按账户和币种维护现金余额 |
-| 真实交易 | 不支持，不连接券商交易 API |
+| 用户体系 | 邮箱注册、Argon2 密码、会话 Cookie、邮箱验证 |
+| 撮合 / 行情 | **无**。成交价由调用方注入，没有行情源或回测时钟 |
+| 手续费 / 保证金 / 风控 | **无** |
+| 真实交易 | **不支持**，不连接券商交易 API |
 
-成交会在一个事务中联动更新订单、持仓和现金。成交 `EXEC_ID` 具有幂等性，重试同一模拟成交不会重复记账。
+成交会在一个事务中联动更新订单、持仓和现金。成交 `EXEC_ID` 具有幂等性，
+重试同一模拟成交不会重复记账。
 
-## 数据模型
+## 快速开始
 
-| 表 | 说明 |
-| --- | --- |
-| `CONTRACTS` | 合约标识、证券类型、交易所、币种和乘数 |
-| `ACCOUNTS` | 模拟账户、账户类型和状态 |
-| `ORDERS` | 模拟订单、价格、数量、有效期和状态 |
-| `FILLS` | 模拟成交明细和执行 ID |
-| `POSITIONS` | 每账户/合约的多空持仓和平均成本 |
-| `CASH_BALANCES` | 每账户/币种的现金余额 |
-
-资金和数量最多支持 6 位小数，应用层使用 Decimal，数据库使用 INTEGER 微单位（1_000_000 = 1）存储，读写时缩放，保证定点精确往返。
-
-## 构建
-
-前端使用 Vite + React + TypeScript，构建产物会被 Rust 服务嵌入二进制：
+构建顺序不能颠倒：`src/web.rs` 用 `include_str!` 嵌入 `frontend/dist`，
+所以前端产物必须先于后端编译产出。
 
 ```bash
 cd frontend
 npm ci
 npm run build
 cd ..
-```
 
-然后构建后端：
-
-```bash
 cargo build --release
+
+export DB_PATH=./ib.sqlite3
+./target/release/ib init-db
+./target/release/ib serve
 ```
 
-无需安装任何数据库客户端：SQLite 以 `bundled` 特性静态编译进二进制，直接读写本地文件。
+打开 <http://localhost:8081>，注册一个账户即可。
+用 `localhost` 而非 `127.0.0.1` 或局域网 IP——会话 Cookie 带 `Secure` 标记。
 
-## 质量门禁
+无需安装任何数据库客户端：SQLite 以 `bundled` 特性静态编译进二进制。
 
-后端：
-
-```bash
-cargo fmt --all --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --lib          # 单元测试
-cargo test --test api     # 端到端测试（真实 HTTP + 临时 SQLite 库）
-```
-
-前端：
+### CLI 快速上手
 
 ```bash
-cd frontend
-npm ci
-npm run check             # 格式 + ESLint + Vitest
-npm run build             # tsc -b && vite build
-```
-
-`.github/workflows/ci.yml` 在每次 push 和 PR 上执行以上全部检查。注意后端通过 `include_str!` 嵌入 `frontend/dist`，所以编译后端前需要先执行前端构建。
-
-## 数据库连接
-
-```bash
-export DB_PATH=/var/lib/ib/ib.sqlite3
-```
-
-CLI 默认 `DB_PATH=./ib.sqlite3`（当前目录）；服务单元通过 `StateDirectory=ib` 使用 `/var/lib/ib/ib.sqlite3`（沙箱下可写，`ProtectHome=read-only` 不受影响）。父目录不存在会自动创建，首次使用前执行 `ib init-db` 建表。数据库以 WAL 模式打开，并启用 `foreign_keys` 外键约束。
-
-`ib serve` 使用单连接池（`Mutex<Connection>`）：SQLite 同一时刻只有一个写者，请求级持锁同时串行化了订单号分配。`/api/health` 会实际执行数据库探活查询，数据库不可用时返回 HTTP 503。
-
-数据库结构由 `migrations/*.sql` 定义，并在 `SCHEMA_MIGRATIONS` 表记录已应用的迁移。`ib init-db` 幂等：已应用的迁移会跳过，历史库（没有账本）也可以安全重复执行。收到 SIGINT/SIGTERM 时服务先排空连接再退出，避免丢弃进行中的账本写入。
-
-## 模拟交易示例
-
-```bash
-ib ping
 ib init-db
 ib account add U1234567 MARGIN
 ib contract add 265598 AAPL STK SMART USD
 ib cash set U1234567 USD 100000
 ib order place 1 U1234567 265598 BUY LMT 100 185.50
-
-# 注入模拟成交；策略重试时复用同一个 EXEC_ID
-ib fill add 1 U1234567 185.52 EX-20260825-0001
-
+ib fill add 1 U1234567 185.52 EX-20260825-0001   # 同 EXEC_ID 重试不会重复记账
 ib order list FILLED
 ib position list U1234567
 ib cash list U1234567
 ```
 
-`fill add` 当前会把订单剩余数量一次性成交，适合作为最小纸上交易闭环。自动撮合、行情驱动成交、手续费、保证金和风控尚未纳入当前版本。
+完整命令参考见 [docs/cli.md](docs/cli.md)。
 
-新数据库使用 `ib init-db` 创建全部交易和认证表。已有交易数据库可先执行 `ib init-auth`，只追加用户和会话表，不会触碰现有交易数据。
+## 文档
 
-## 用户注册与登录
+| 文档 | 内容 |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | 进程拓扑、构建顺序约束、模块地图、请求生命周期、关键设计决策、安全姿态 |
+| [docs/cli.md](docs/cli.md) | 全部 17 个 CLI 命令的参数、行为与坑 |
+| [docs/api.md](docs/api.md) | HTTP API 参考：端点、请求/响应、状态码、静态资源、完整 curl 示例 |
+| [docs/database.md](docs/database.md) | 10 张表的完整列与约束、定点约定、索引、迁移机制 |
+| [docs/frontend.md](docs/frontend.md) | 前端结构、状态管理约定、视图与路由、快捷键、PWA、已知限制 |
+| [docs/deployment.md](docs/deployment.md) | 环境变量、本地运行、Caddy、systemd、升级流程 |
+| [docs/testing.md](docs/testing.md) | 质量门禁命令、CI 编排、98 个测试的完整清单与未覆盖区域 |
+| [TODO.md](TODO.md) | 待办与执行记录 |
 
-启动 HTTP API：
+## 技术要点
 
-```bash
-export SERVER_ADDR=127.0.0.1:8081
-ib serve
-```
+- **单文件 SQLite，无外部服务。** 唯一的可选依赖是 Resend，未配置时功能降级但不报错。
+- **定点整数微单位。** 金额和数量在库中是 `INTEGER`（`1_000_000` = 1 单位），
+  应用层用 `Decimal`，全程不经过 `f64`，`185.52` 精确往返。
+- **单连接 + 互斥锁。** SQLite 天然单写者；请求级持锁顺带串行化了订单号分配，
+  所以 `next_order_id` 不需要行锁。
+- **同步工作离开 reactor。** SQLite 查询和 Argon2 哈希全部走 `spawn_blocking`。
+- **优雅关停。** SIGINT / SIGTERM 先排空连接再退出，不丢进行中的账本写入。
+- **幂等且不伪造状态。** 同一 `EXEC_ID` 重试是 no-op；未配置邮件服务时
+  `email_verified` 恒为 `false`，绝不假装已验证。
+- **校验不靠前端。** 入金金额正数等业务规则在服务端强制执行，浏览器检查只是体验优化。
+- **契约共享。** `api-schema.json` 同时约束 Rust 的序列化字段和前端的类型键集。
 
-接口包括：
+未完成的能力（撮合、行情、手续费、风控、限流）见 [TODO.md](TODO.md#待办)。
 
-- `POST /api/auth/register`：`{"email":"user@example.com","password":"..."}`，只创建账户并发送验证邮件，不签发会话（201 无 Cookie）
-- `POST /api/auth/login`：登录并设置 HttpOnly 会话 Cookie；已配置 Resend 时未验证邮箱返回 403，需先验证
-- `POST /api/auth/logout`：注销当前会话
-- `GET /api/auth/me`：读取当前登录用户
-- `GET /api/health`：健康检查
+## 许可
 
-登录后可用的模拟交易接口：
-
-- `GET /api/trading/overview`：当前用户的模拟账户、合约、订单、持仓、现金和成交
-- `GET/POST /api/trading/contracts`：查询或添加模拟合约
-- `GET/POST /api/trading/orders`：查询或提交模拟订单
-- `POST /api/trading/orders/{order_id}/cancel`：撤销当前用户的订单
-- `POST /api/trading/orders/{order_id}/fill`：注入当前用户订单的模拟成交
-- `GET /api/trading/positions`、`GET /api/trading/cash`、`POST /api/trading/cash`、`GET /api/trading/fills`
-
-密码使用 Argon2 哈希，会话只在数据库保存令牌哈希。注册时创建 24 小时有效的邮箱验证码并经 Resend 发送（`POST https://api.resend.com/emails`），验证链接形如 `/?verify_token=...`；验证接口为 `POST /api/auth/verify`（`{"token":"..."}`，一次有效，过期返回 410），重发为 `POST /api/auth/resend-verification`（`{"email":"..."}`，未知邮箱与已验证账户返回同样的通用成功，避免枚举账户）。
-
-Resend 通过 `RESEND_API_KEY`（必填）、`RESEND_FROM`（默认 `ib <onboarding@resend.dev>`，生产需换成已验证域名）和 `APP_BASE_URL`（默认 `http://127.0.0.1:8081`，生产如 `https://ibkr.20070809.xyz`）配置，见 `deploy/ib.env.example`。未配置密钥时注册照常成功但 `email_verified` 保持 `false`，绝不伪造已验证；此时登录门禁自动降级（未验证也可登录，防本地/开发环境锁死），发送失败只记日志（`eprintln!`），同样不影响注册。已有老库执行 `ib init-auth` 即可补上 `EMAIL_VERIFICATIONS` 表（新代码在写入前也会 `CREATE TABLE IF NOT EXISTS` 自愈）。
-
-前端页面由同一个 Rust 服务提供，包含登录、注册、登录态恢复、用户信息、模拟账户、合约、下单、撤单、模拟成交、持仓和现金账本视图。每个登录用户按用户 ID 获得一个稳定的模拟账户。前端同时提供 PWA Manifest、192/512 图标和 Service Worker：交易 API 不进入离线缓存，离线时只保留页面壳。直接访问 `https://ibkr.20070809.xyz/` 即可打开页面。
-
-## Caddy 部署
-
-`deploy/Caddyfile` 将 `https://ibkr.20070809.xyz/` 反向代理到本机的 `127.0.0.1:8081`。启动服务后将该配置加入 Caddy：
-
-```bash
-caddy validate --config deploy/Caddyfile
-caddy reload --config deploy/Caddyfile
-```
-
-## systemd 部署
-
-`deploy/ib.service` 以 `ubuntu` 用户运行 release 二进制，监听 `127.0.0.1:8081`，适合配合上面的 Caddy 配置。
-
-```bash
-cd frontend && npm ci && npm run build && cd ..
-cargo build --release
-sudo install -d -m 0750 /etc/ib
-sudo install -o root -g ubuntu -m 0640 deploy/ib.env.example /etc/ib/ib.env
-sudoedit /etc/ib/ib.env
-
-sudo install -m 0644 deploy/ib.service /etc/systemd/system/ib.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now ib.service
-sudo systemctl status ib.service
-```
-
-查看日志或重启：
-
-```bash
-journalctl -u ib.service -f
-sudo systemctl restart ib.service
-```
+见 [LICENSE](LICENSE)。

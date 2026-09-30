@@ -86,6 +86,26 @@ commands:
     std::process::exit(2);
 }
 
+/// Report a failed operation and exit with code 1.
+///
+/// Constraint violations, unknown rows and precision errors are ordinary
+/// outcomes of a command-line tool, not bugs. Printing one line keeps a
+/// `set -e` script working and avoids a panic backtrace; the previous code
+/// called `panic!` in every arm, so a duplicate contract id surfaced as a
+/// Rust backtrace and exit code 101.
+fn abort(message: impl std::fmt::Display) -> ! {
+    eprintln!("ib: {message}");
+    std::process::exit(1);
+}
+
+/// Run a data-layer operation, reporting failure through [`abort`].
+fn attempt<T>(what: &str, operation: impl FnOnce() -> Result<T, String>) -> T {
+    match operation() {
+        Ok(value) => value,
+        Err(error) => abort(format!("{what} failed: {error}")),
+    }
+}
+
 fn decimal_arg(value: &str) -> Decimal {
     Decimal::from_str(value).unwrap_or_else(|_| usage())
 }
@@ -137,7 +157,7 @@ async fn main() {
             Some("add") => {
                 let id = args.required(2);
                 let account_type = args.opt(3).unwrap_or("MARGIN");
-                db::add_account(&conn, id, account_type);
+                attempt("account", || db::add_account(&conn, id, account_type));
                 println!("account {} ({}) created", id, account_type);
             }
             Some("list") => {
@@ -159,8 +179,7 @@ async fn main() {
                     exchange: args.opt(5).unwrap_or("SMART").to_owned(),
                     currency: args.opt(6).unwrap_or("USD").to_owned(),
                 };
-                db::add_contract(&conn, &contract)
-                    .unwrap_or_else(|error| panic!("contract failed: {error}"));
+                attempt("contract", || db::add_contract(&conn, &contract));
                 println!("contract {} {} added", contract.conid, contract.symbol);
             }
             Some("list") => {
@@ -189,8 +208,7 @@ async fn main() {
                     lmt_price: args.optional_decimal(8),
                     aux_price: args.optional_decimal(9),
                 };
-                db::place_order(&conn, &order)
-                    .unwrap_or_else(|error| panic!("order failed: {error}"));
+                attempt("order", || db::place_order(&conn, &order));
                 println!("order {} submitted", order.order_id);
             }
             Some("list") => {
@@ -216,8 +234,9 @@ async fn main() {
             }
             Some("cancel") => {
                 let order_id = args.int(2);
-                db::cancel_order(&conn, order_id, args.required(3))
-                    .unwrap_or_else(|error| panic!("cancel failed: {error}"));
+                attempt("cancel", || {
+                    db::cancel_order(&conn, order_id, args.required(3))
+                });
                 println!("order {order_id} cancelled");
             }
             _ => usage(),
@@ -233,20 +252,22 @@ async fn main() {
                     account_id: args.required(3).to_owned(),
                     price: args.decimal(4),
                 };
-                db::record_fill(&conn, &fill).unwrap_or_else(|error| panic!("{error}"));
+                attempt("fill", || db::record_fill(&conn, &fill));
                 println!("fill recorded on order {}", fill.order_id);
             }
             _ => usage(),
         },
         "position" => match args.sub() {
             Some("set") => {
-                db::set_position(
-                    &conn,
-                    args.required(2),
-                    args.int(3),
-                    args.decimal(4),
-                    args.optional_decimal(5),
-                );
+                attempt("position", || {
+                    db::set_position(
+                        &conn,
+                        args.required(2),
+                        args.int(3),
+                        args.decimal(4),
+                        args.optional_decimal(5),
+                    )
+                });
                 println!("position updated");
             }
             Some("list") => {
@@ -261,8 +282,9 @@ async fn main() {
         },
         "cash" => match args.sub() {
             Some("set") => {
-                db::set_cash(&conn, args.required(2), args.required(3), args.decimal(4))
-                    .unwrap_or_else(|error| panic!("cash update failed: {error}"));
+                attempt("cash update", || {
+                    db::set_cash(&conn, args.required(2), args.required(3), args.decimal(4))
+                });
                 println!("balance updated");
             }
             Some("list") => {

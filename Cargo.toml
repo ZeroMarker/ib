@@ -42,6 +42,12 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "io-util", "signal", "time"] }
+# tests/api.rs opens the scratch database directly to plant expired sessions
+# and stale verification rows that cannot be produced through the API, and
+# digests a token to build a row whose hash the server will match.
+serde_json = "1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
 
 [profile.release]
 strip = true

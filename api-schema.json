@@ -1,0 +1,56 @@
+{
+  "//": "Wire contract shared by the Rust API and the frontend. src/models.rs serializes these structs and the unit tests in that module assert the serialized field names equal this file, so a struct change without a contract update fails the build. frontend/src/types.ts derives its shapes from this same file, so a field rename cannot compile on one side and silently miss on the other. Edit by hand alongside the Rust structs.",
+  "types": {
+    "Account": {
+      "account_id": "string",
+      "account_type": "string",
+      "currency": "string",
+      "status": "string"
+    },
+    "CashBalance": { "account_id": "string", "currency": "string", "cash": "string" },
+    "Contract": {
+      "conid": "number",
+      "symbol": "string",
+      "sec_type": "string",
+      "exchange": "string",
+      "currency": "string"
+    },
+    "Fill": {
+      "exec_id": "string",
+      "order_id": "number",
+      "account_id": "string",
+      "conid": "number",
+      "side": "string",
+      "quantity": "string",
+      "price": "string"
+    },
+    "Order": {
+      "order_id": "number",
+      "perm_id": "number|null",
+      "account_id": "string",
+      "conid": "number",
+      "side": "string",
+      "order_type": "string",
+      "total_quantity": "string",
+      "filled_quantity": "string",
+      "lmt_price": "string|null",
+      "aux_price": "string|null",
+      "status": "string"
+    },
+    "Overview": {
+      "account": "Account",
+      "contracts": "Contract[]",
+      "orders": "Order[]",
+      "positions": "Position[]",
+      "cash": "CashBalance[]",
+      "fills": "Fill[]"
+    },
+    "Position": {
+      "account_id": "string",
+      "conid": "number",
+      "position": "string",
+      "avg_cost": "string|null"
+    },
+    "UserResponse": { "user_id": "string", "email": "string", "email_verified": "boolean" }
+  }
+}

@@ -12,6 +12,7 @@ const overview: Overview = {
   orders: [
     {
       order_id: 1,
+      perm_id: null,
       account_id: 'SIMabc',
       conid: 1,
       side: 'BUY',
@@ -24,6 +25,7 @@ const overview: Overview = {
     },
     {
       order_id: 2,
+      perm_id: null,
       account_id: 'SIMabc',
       conid: 2,
       side: 'SELL',
@@ -35,14 +37,30 @@ const overview: Overview = {
       aux_price: null,
     },
   ],
-  positions: [{ conid: 1, position: '100', avg_cost: '185.52' }],
+  positions: [{ account_id: 'SIMabc', conid: 1, position: '100', avg_cost: '185.52' }],
   cash: [
-    { currency: 'USD', cash: '81448' },
-    { currency: 'EUR', cash: '500' },
+    { account_id: 'SIMabc', currency: 'USD', cash: '81448' },
+    { account_id: 'SIMabc', currency: 'EUR', cash: '500' },
   ],
   fills: [
-    { exec_id: 'EX1', order_id: 2, quantity: '50', price: '400.1' },
-    { exec_id: 'EX2', order_id: 1, quantity: '10', price: '185.52' },
+    {
+      exec_id: 'EX1',
+      order_id: 2,
+      account_id: 'SIMabc',
+      conid: 2,
+      side: 'SELL',
+      quantity: '50',
+      price: '400.1',
+    },
+    {
+      exec_id: 'EX2',
+      order_id: 1,
+      account_id: 'SIMabc',
+      conid: 1,
+      side: 'BUY',
+      quantity: '10',
+      price: '185.52',
+    },
   ],
 }
 
@@ -123,7 +141,7 @@ describe('useTrading summary', () => {
   it('does not sum positions with a null average cost as zero-cost', async () => {
     stubOverview({
       ...overview,
-      positions: [{ conid: 1, position: '10', avg_cost: null }],
+      positions: [{ account_id: 'SIMabc', conid: 1, position: '10', avg_cost: null }],
     })
     const { result } = renderTrading()
     await waitFor(() => expect(result.current.overview).not.toBeNull())

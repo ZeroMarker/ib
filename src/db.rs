@@ -64,22 +64,34 @@ fn commit(conn: &Connection, what: &str) -> Result<(), String> {
     })
 }
 
-/// Strip `--` comment lines and yield one statement per `;` terminator.
+/// Strip `--` comment lines and yield one statement per top-level `;`.
 ///
-/// This is a deliberately small parser: the migrations in this repository are
-/// plain DDL with no string literals or `BEGIN ... END` trigger bodies, both
-/// of which a naive `;` split would corrupt. It tracks single- and
-/// double-quoted spans so a semicolon or `--` inside a literal survives.
+/// A naive `split(';')` corrupts SQL in three ways, all of which this handles:
+///
+/// 1. a `;` inside a `'...'` or `"..."` literal;
+/// 2. a `--` comment containing a `;`;
+/// 3. the body of a `CREATE TRIGGER ... BEGIN ... END;`, which contains both
+///    semicolons and its own `END` keyword.
+///
+/// Case 3 is why this cannot be a plain scanner: `END` only closes a trigger
+/// body when it is followed by a `;`, and a bare `END` can also appear inside
+/// a string or a `CASE ... END` expression. Tracking a `BEGIN`/`END` depth
+/// counter and only splitting on a `;` at depth zero is what lets a migration
+/// add a trigger without silently executing its body as separate statements.
 fn split_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut quote: Option<char> = None;
+    // Non-zero while inside a `BEGIN ... END` block (a trigger body). Semicolons
+    // at depth > 0 belong to the block and must not split the statement.
+    let mut block_depth: usize = 0;
     for line in sql.lines() {
         let trimmed = line.trim_start();
         if quote.is_none() && trimmed.starts_with("--") {
             continue;
         }
-        for character in line.chars() {
+        let characters: Vec<char> = line.chars().collect();
+        for (index, character) in characters.iter().copied().enumerate() {
             match quote {
                 Some(open) if character == open => quote = None,
                 Some(_) => {}
@@ -88,7 +100,25 @@ fn split_statements(sql: &str) -> Vec<String> {
                     _ => {}
                 },
             }
-            if character == ';' && quote.is_none() {
+
+            // Keywords are recognized only outside quotes, and only when they
+            // stand alone as words: `BEGINNING` or `APPEND` must not count.
+            if quote.is_none() && is_keyword(&characters, index, "BEGIN") {
+                block_depth += 1;
+            } else if quote.is_none() && is_keyword(&characters, index, "END") {
+                // `END` inside a `CASE ... END` expression closes the case, not
+                // a block. Distinguishing the two needs real parsing; the
+                // conservative choice is to only decrement on a bare `END`
+                // that is itself followed by `;` or end-of-input, which is how
+                // a trigger body always terminates.
+                if block_depth > 0 && ends_block(&characters, index) {
+                    block_depth -= 1;
+                }
+            }
+
+            // The `END` that closes a trigger is followed by the statement's
+            // own `;`; splitting on that `;` is what emits the whole trigger.
+            if character == ';' && quote.is_none() && block_depth == 0 {
                 let statement = current.trim().to_owned();
                 if !statement.is_empty() {
                     statements.push(statement);
@@ -105,6 +135,49 @@ fn split_statements(sql: &str) -> Vec<String> {
         statements.push(trailing);
     }
     statements
+}
+
+/// True when `keyword` appears at `index` in `line` as a standalone word.
+///
+/// Requires a non-word character (or line end) on both sides, so `END` does
+/// not match inside `APPEND` and `BEGIN` does not match inside `BEGINNER`.
+fn is_keyword(line: &[char], index: usize, keyword: &str) -> bool {
+    let starts_word = index == 0 || !is_word_char(line[index - 1]);
+    if !starts_word {
+        return false;
+    }
+    let end = index + keyword.chars().count();
+    if end > line.len() {
+        return false;
+    }
+    let matches = keyword
+        .chars()
+        .enumerate()
+        .all(|(offset, expected)| line[index + offset].eq_ignore_ascii_case(&expected));
+    if !matches {
+        return false;
+    }
+    end == line.len() || !is_word_char(line[end])
+}
+
+/// True when this `END` is the only word on its line.
+///
+/// A trigger body always closes with `END;` alone on its own line, which is
+/// what SQLite's own trigger syntax requires. Requiring the line to be
+/// otherwise blank is what keeps a `CASE ... END` from closing the block: that
+/// `END` has SQL in front of it on the same line.
+fn ends_block(line: &[char], index: usize) -> bool {
+    let before_is_blank = line[..index]
+        .iter()
+        .all(|character| character.is_whitespace());
+    let after_is_terminator = line[index + "END".chars().count()..]
+        .iter()
+        .all(|character| character.is_whitespace() || *character == ';');
+    before_is_blank && after_is_terminator
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
 }
 
 fn apply_migration(conn: &Connection, sql: &str, name: &str) {
@@ -262,13 +335,22 @@ pub fn drop_schema(conn: &Connection) {
     }
 }
 
-pub fn add_account(conn: &Connection, account_id: &str, account_type: &str) {
+/// Create a simulation account.
+///
+/// Returns the constraint message instead of panicking: a duplicate id is an
+/// ordinary user error that the CLI reports as `ib: account failed: ...`
+/// with exit code 1, and that a library caller can handle.
+pub fn add_account(conn: &Connection, account_id: &str, account_type: &str) -> Result<(), String> {
     let account_type = account_type.to_uppercase();
+    if !["CASH", "MARGIN", "IRA"].contains(&account_type.as_str()) {
+        return Err(format!("unsupported account type: {account_type}"));
+    }
     conn.execute(
         "INSERT INTO ACCOUNTS (ACCOUNT_ID, ACCOUNT_TYPE) VALUES (?1, ?2)",
         params![account_id, account_type],
     )
-    .unwrap_or_else(|e| panic!("SQL failed: {e}"));
+    .map(|_| ())
+    .map_err(|error| error.to_string())
 }
 
 /// Derive a stable, private simulation account ID from an authenticated user ID.
@@ -722,15 +804,21 @@ fn contract_details(conn: &Connection, conid: i64) -> Result<(String, Decimal), 
     Ok((currency, Decimal::new(multiplier, 6)))
 }
 
+/// Overwrite a position snapshot directly, bypassing the fill ledger.
+///
+/// Still returns `Result` rather than panicking so the CLI can report a bad
+/// conid or an out-of-range quantity as a normal error.
 pub fn set_position(
     conn: &Connection,
     account_id: &str,
     conid: i64,
     position: Decimal,
     avg_cost: Option<Decimal>,
-) {
-    let position = scaled(&position).expect("invalid position");
-    let avg_cost = avg_cost.map(|value| scaled(&value).expect("invalid average cost"));
+) -> Result<(), String> {
+    let position = scaled(&position).map_err(|error| error.to_string())?;
+    let avg_cost = avg_cost
+        .map(|value| scaled(&value).map_err(|error| error.to_string()))
+        .transpose()?;
     conn.execute(
         "INSERT INTO POSITIONS (ACCOUNT_ID, CONID, POSITION, AVG_COST, UPDATED_AT) \
          VALUES (?1, ?2, ?3, ?4, datetime('now')) \
@@ -739,7 +827,8 @@ pub fn set_position(
             UPDATED_AT = datetime('now')",
         params![account_id, conid, position, avg_cost],
     )
-    .expect("position update failed");
+    .map(|_| ())
+    .map_err(|error| format!("position update failed: {error}"))
 }
 
 pub fn set_cash(
@@ -840,6 +929,63 @@ mod tests {
     }
 
     #[test]
+    fn trigger_bodies_stay_in_one_statement() {
+        // The trigger body has two internal semicolons and its own END; a naive
+        // split would execute the fragments as separate statements and fail.
+        let sql = "\
+CREATE TABLE AUDIT (ID INTEGER PRIMARY KEY, NOTE TEXT);
+CREATE TRIGGER IX_AUDIT_UPDATED AFTER UPDATE ON AUDIT
+BEGIN
+  INSERT INTO AUDIT (NOTE) VALUES ('touched');
+  UPDATE AUDIT SET NOTE = 'done;' WHERE ID = NEW.ID;
+END;
+CREATE INDEX IX_AUDIT_NOTE ON AUDIT (NOTE);
+";
+        let statements = split_statements(sql);
+        assert_eq!(statements.len(), 3, "{statements:#?}");
+        assert!(statements[0].starts_with("CREATE TABLE AUDIT"));
+        let trigger = &statements[1];
+        assert!(trigger.starts_with("CREATE TRIGGER"));
+        assert!(trigger.contains("'touched'"));
+        assert!(trigger.contains("'done;'"));
+        // The statement's own `;` is the split point and is not retained,
+        // matching every other statement this function returns.
+        assert!(trigger.trim_end().ends_with("END"), "{trigger}");
+        assert!(statements[2].starts_with("CREATE INDEX"));
+    }
+
+    #[test]
+    fn trigger_keywords_must_stand_alone() {
+        // A column named APPENDEND or a table called BEGINNER must not be
+        // mistaken for a block boundary, and a trailing comment mentioning
+        // BEGIN must not open a block.
+        let statements = split_statements(
+            "-- this mentions BEGIN and END in prose\n\
+             CREATE TABLE BEGINNER (APPENDEND TEXT, BEGIN_LABEL TEXT);\n\
+             CREATE TABLE PLAIN (A TEXT);\n",
+        );
+        assert_eq!(statements.len(), 2, "{statements:#?}");
+        assert!(statements[0].contains("BEGINNER"));
+        assert!(statements[1].contains("PLAIN"));
+    }
+
+    #[test]
+    fn a_case_expression_inside_a_trigger_does_not_close_the_block() {
+        // `CASE ... END` ends with END, but it is followed by more SQL rather
+        // than by `;`, so it must not decrement the block depth.
+        let sql = "\
+CREATE TRIGGER T AFTER INSERT ON AUDIT
+BEGIN
+  UPDATE AUDIT SET NOTE = CASE WHEN NEW.NOTE IS NULL THEN 'a' ELSE 'b' END;
+END;
+";
+        let statements = split_statements(sql);
+        assert_eq!(statements.len(), 1, "{statements:#?}");
+        assert!(statements[0].contains("CASE WHEN"));
+        assert!(statements[0].trim_end().ends_with("END"));
+    }
+
+    #[test]
     fn init_schema_is_idempotent_and_records_a_ledger() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         init_schema(&conn);
@@ -865,7 +1011,7 @@ mod tests {
     fn init_auth_schema_adds_login_tables_without_dropping_trading_data() {
         let conn = Connection::open_in_memory().expect("in-memory db");
         init_schema(&conn);
-        add_account(&conn, "U1", "MARGIN");
+        add_account(&conn, "U1", "MARGIN").expect("insert account");
         set_cash(&conn, "U1", "USD", Decimal::from_str("500").unwrap()).unwrap();
         // Simulate a pre-ledger database: the trading tables exist but are
         // not recorded, which is exactly the state of deployed installs.
@@ -940,7 +1086,7 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .expect("pragma");
         init_schema(&conn);
-        add_account(&conn, "U1234567", "MARGIN");
+        add_account(&conn, "U1234567", "MARGIN").expect("insert account");
         add_contract(
             &conn,
             &Contract {
@@ -1026,7 +1172,7 @@ mod tests {
         conn.execute_batch("PRAGMA foreign_keys = ON;")
             .expect("pragma");
         init_schema(&conn);
-        add_account(&conn, "U1", "MARGIN");
+        add_account(&conn, "U1", "MARGIN").expect("insert account");
         assert_eq!(next_order_id(&conn, "U1").unwrap(), 1);
         add_contract(
             &conn,
